@@ -1,29 +1,14 @@
-# SPDX-FileCopyrightText: 2025 Google LLC
-#
-# SPDX-License-Identifier: Apache-2.0
+##############################################################
+#####       NY LED MATRIX TRAFFIC SIGN                ########
+#####             Work In progress...                 ########
+#####                 (C) 2025 Keith Elkin            ########
+##############################################################
 
-"""
-CircuitPython script to fetch traffic sign messages from the 511ny API.
+#Powered by 511NY.COM
+#Credits will be provided once project is completed and
+#final selection of libraries is completed.
 
-This script connects to Wi-Fi, downloads JSON data containing traffic sign
-information, parses it, and extracts the 'Message' field from each sign
-into a list.
 
-Required Libraries:
-- adafruit_requests
-- wifi
-- socketpool
-
-Required Hardware:
-- CircuitPython board with Wi-Fi capability (e.g., ESP32-S2, ESP32-S3)
-
-Required Files:
-- secrets.py (in the root directory) containing Wi-Fi credentials:
-  secrets = {
-      'ssid': 'YOUR_WIFI_SSID',
-      'password': 'YOUR_WIFI_PASSWORD'
-  }
-"""
 ################# TEST OF OTA UPDATE ###################
 ###################### 6/1/2025 12:09AM ################
 ########################################################
