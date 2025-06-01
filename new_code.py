@@ -1,0 +1,360 @@
+# SPDX-FileCopyrightText: 2025 Google LLC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+CircuitPython script to fetch traffic sign messages from the 511ny API.
+
+This script connects to Wi-Fi, downloads JSON data containing traffic sign
+information, parses it, and extracts the 'Message' field from each sign
+into a list.
+
+Required Libraries:
+- adafruit_requests
+- wifi
+- socketpool
+
+Required Hardware:
+- CircuitPython board with Wi-Fi capability (e.g., ESP32-S2, ESP32-S3)
+
+Required Files:
+- secrets.py (in the root directory) containing Wi-Fi credentials:
+  secrets = {
+      'ssid': 'YOUR_WIFI_SSID',
+      'password': 'YOUR_WIFI_PASSWORD'
+  }
+"""
+################# TEST OF OTA UPDATE ###################
+###################### 6/1/2025 12:09AM ################
+########################################################
+
+import ssl ##Used to create secure connections using network sockets (SSL/TLS)
+import wifi  ##Handles wifi connectivity
+import socketpool ##Handles sockets through a pool
+import adafruit_requests ## Used to easily make HTTP and HTTPS requests
+import time ## Library for working with time functions
+import os ## A collection of libraries that makes it easier to interract with sensors, displays, and other components.
+import terminalio #
+import sys 
+from adafruit_matrixportal.matrixportal import MatrixPortal #
+import json
+import microcontroller
+
+cycles = (0) #Counter that tracks how many cycles the main program has executed for troubleshooting
+
+def main_program():
+
+#Function to center text
+    def center_multiline_string(text, width):
+      """
+      Centers each line of a multi-line string.
+
+      Args:
+        text: The input string, potentially containing multiple newline characters.
+        width: The desired width of each line for centering.
+
+      Returns:
+        A new string with each line centered according to the specified width.
+      """
+      lines = text.splitlines()  # Split the string into a list of lines
+      centered_lines = []
+      for line in lines:
+        centered_lines.append(line.center(width))
+      return "\n".join(centered_lines)
+
+
+    # --- Configuration ---
+    # Get Wi-Fi credentials from secrets.py
+    try:
+        from secrets import secrets
+    except ImportError:
+        print("WiFi secrets are kept in secrets.py, please add them there!")
+        raise
+
+    # URL for the 511ny traffic message signs API
+    DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["url_suffix"]) 
+
+
+    #Set Debug Mode
+    ## Debug Values
+    # 0 = No Debug Info
+    # 1 = Display signs during load
+
+    debug =  (secrets["debug"])   #This is the debug mode of the program, not the HUB75 Matrix
+    width = int((secrets["width"])) # The width of the matrix panel(s)
+    height = (secrets["height"]) #  The height of the matrix panel(s)
+    bit_depth = (secrets["depth"]) # bit depth of the panels
+    matrix_debug = (secrets["matrix_debug"]) #Debug mode of the Matrixportal
+    characters_per_line = (secrets["characters_per_line"]) #Define how many characters per line on the LED Matrix
+    sign_text_color = (secrets["sign_text_color"])   #Text color code. Some boards don't use RGB, but are GRB or BGR.
+    #matrix portal setup
+
+    matrixportal = MatrixPortal(width=int(width), height=int(height), bit_depth=int(bit_depth), debug=str(matrix_debug)) #Define matrix resolution
+    # Create a label for the sign
+    matrixportal.add_text(
+        text_font=terminalio.FONT,
+        text_position=(0, 15),  
+        scrolling=False,
+        line_spacing=(0.8),
+        text_color=(sign_text_color)
+        )
+
+## Color codes are usually in order RGB, sometime's they're reversed. To test,
+## Change each octet of the color code to "FF" and the others "00" one at a time and
+## note their order.
+## The normal color for road sign yellow in RGB format is #F7B500
+## Small P4 panels I have are in GBR
+## They should be                RGB
+## RED =    F7
+## GREEN =  B5
+## BLUE =   00 
+    ##################################################
+    ####  Start Of preferred sign list import ########
+    ##################################################
+    
+
+    # Define the name of the file favorite signs are stored in.
+    filename = "sign_list.txt"
+
+    # Initialize an empty list to store the lines from the file
+    favsign_list = []
+
+    print(f"Attempting to load '{filename}'")
+
+    try:
+        # Open the file in read mode ('r')
+        # Using 'with' ensures the file is automatically closed even if errors occur
+        with open(filename, "r") as f:
+            # Read line by line
+            for line in f:
+                #print(".")
+                sys.stdout.write('.')
+                # Remove leading/trailing whitespace (including the newline character '\n')
+                cleaned_line = line.strip()
+                # Only add non-empty lines (optional, remove if empty lines are needed)
+                if cleaned_line:
+                    favsign_list.append(cleaned_line)
+                
+
+        print(f"Successfully loaded {len(favsign_list)} entries from '{filename}'.")
+        # Optional: Print the loaded list for verification
+        # print("Loaded list:", sign_list)
+
+    except OSError as e:
+        # Handle the case where the file doesn't exist or cannot be opened
+        print(f"Error: Could not open or read file '{filename}'.")
+        print(f"Reason: {e}")
+        print("Please ensure 'sign_list.txt' exists in the root directory of the CIRCUITPY drive.")
+        # Keep sign_list as an empty list in case of error
+        sign_list = []
+
+
+
+    ################################################
+    ####  End Of preferred sign list import ########
+    ################################################
+
+
+    # --- Network Setup ---
+    print(f"Connecting to {secrets['ssid']}...")
+    try:
+        wifi.radio.connect(secrets["ssid"], secrets["password"])
+        print(f"Connected to {secrets['ssid']}!")
+        print(f"My IP address: {wifi.radio.ipv4_address}")
+
+        # Create a socket pool and requests session
+        pool = socketpool.SocketPool(wifi.radio)
+        requests = adafruit_requests.Session(pool, ssl.create_default_context())
+
+    except ConnectionError as e:
+        print(f"Failed to connect to Wi-Fi: {e}")
+        # Optional: Add retry logic or specific error handling here
+        raise # Re-raise the exception to stop the script if connection fails
+
+    # --- Data Fetching and Processing ---
+    dl_sign_id = [] ##Initialize an empty list to store the sign IDs
+    dl_sign_name = [] ## Initialize an empty list to store the sign names
+    dl_sign_roadway = [] ##Initialize an empty list to store the sign roadway
+    dl_sign_direction = [] ##Initialize an empty list to store the sign facing directions
+    dl_sign_messages = [] # Initialize an empty list to store messages
+    dl_sign_display_toggle = [] # Display Toggle for each sign
+
+
+    print(f"Fetching data from {DATA_SOURCE_URL}")
+    try:
+        # Perform the GET request
+        response = requests.get(DATA_SOURCE_URL)
+
+        # Check if the request was successful (status code 200)
+        if response.status_code == 200:
+            print("Request successful.")
+            try:
+                # Parse the JSON response
+                json_data = response.json()
+                
+                # Check if the response is a list (as expected from the API)
+                if isinstance(json_data, list):   #If the JSON data is a list, run the code below
+                 
+                 
+                 # Iterate through each sign object in the list
+                    
+                    for sign in json_data:
+                        
+                       ## print(sign)    #debugging from keith
+                        # Check if the 'Message' key exists and is not None
+                        if 'Messages' in sign and sign['Messages'] is not None: #If a field called "Messages" exists in the "sign"...
+                            # ...object, and the value of the "Messages" field isn't empty / none, then execute the following loop.
+                            
+                            # Append the message to the list
+                            dl_sign_id.append(sign['ID'])
+                            dl_sign_name.append(sign['Name']) #Add the name of the sign to the list.
+                            dl_sign_roadway.append(sign['Roadway'])
+                            dl_sign_direction.append(sign['DirectionOfTravel'])
+                            dl_sign_messages.append(sign['Messages']) #Add the text for the current message to the sign_messages list.
+                            
+                        else:
+                            # Handle cases where 'Message' might be missing or null
+                            print(f"Warning: Sign object missing 'Messages' or it's null: {sign.get('SignName', 'Unknown Sign')}")
+                            # Optionally append a placeholder or skip
+                            # sign_messages.append("Message Unavailable")
+
+                    print(f"\nSuccessfully extracted {len(dl_sign_messages)} sign messages.")
+                    print("--- Sign Messages ---")
+                    print("--------------------")
+                    
+                    # Now the 'sign_messages' list contains all the messages
+                    # You can use this list for display or further processing.
+                    print("\nVariable 'dl_sign_messages' now holds the list of messages.")
+
+                else:
+                    print(f"Error: Expected a JSON list, but received type {type(json_data)}")
+
+            except ValueError as e:
+                # Handle JSON decoding errors
+                print(f"Error parsing JSON response: {e}")
+                print(f"Raw response text: {response.text[:200]}...") # Print beginning of text
+            except Exception as e:
+                # Catch other potential errors during processing
+                print(f"An error occurred during data processing: {e}")
+
+        else:
+            # Handle non-200 status codes
+            print(f"Error: Received status code {response.status_code}")
+            print(f"Response text: {response.text}")
+
+        # Close the response to free up resources
+        response.close()
+
+    except adafruit_requests.RequestError as e:
+        # Handle network-related errors during the request
+        print(f"Network request failed: {e}")
+    except Exception as e:
+        # Catch any other unexpected errors
+        print(f"An unexpected error occurred: {e}")
+
+
+        
+    # Create a label for the sign
+    """matrixportal.add_text(
+        text_font=terminalio.FONT,
+        text_position=(0, 15),  
+        scrolling=False,
+        line_spacing=(0.8),
+        text_color="#FFCC00"
+          
+    )"""
+
+    #print("\nScript finished.")
+
+
+    ##################################################################
+    ################# ITERATE THROUGH SIGNS ##########################
+    ##################################################################
+    # Compare the list of saved signs with signs downloaded from 511NY
+
+    ## dl_sign_list = the list of sign names saved in the sign_list.txt file
+
+    ## dl_sign_id - This is the ID 511NY uses to identify each sign
+    ## dl_sign_name - This is the verbose name 511NY assigns to each sign
+    ## dl_sign_roadway - This is the road or intersection of the signs physical placement
+    ## dl_sign_direction - The direction the sign is facing
+    ## dl_sign_messages - This is the current message each sign is displaying
+    ## dl_sign_display_toggle = [] # Display Toggle for each sign
+
+
+    #First load saved signs into list called sign_list
+    print("Comparing Signs")
+    favoritesigncounter = 0 # This variable stores how many signs are saved in the signs_list.txt file
+    favoritesigniterator = iter(favsign_list) #Create an iteration of saved sign names
+    for _ in range(len(favsign_list)):#Cycle through each sign name loaded from sign_names.txt
+        #sys.stdout.write('.')
+        favitem = next(favoritesigniterator)
+        favoritesigncounter = favoritesigncounter +1 #Keep tally of how many signs were loaded from sign_list.txt#print(f"Favorite Sign: {favoritesigncounter}: {favitem}")
+        #sys.stdout.write('.')
+   # Now it's time to compare the downloaded sign names to the names saved in the favorite (sign_list.txt) list 
+        dlsigncounter = 0 # This variabe is a counter which increments as downloaded signs are compared to favorited signs.
+        downloadedsigniterator = iter(dl_sign_name) #Create an iteration of downloaded sign names
+        for _ in range(len(dl_sign_name)):
+            dlitem = next(downloadedsigniterator)
+            #next(downloadedsigniterator)
+            #Iterate through all downloaded signs and set the display toggle for favorited signs
+            dlsigncounter = dlsigncounter + 1
+            #print(f"FAVITEM: {favitem} - SIGN NAME {dlitem}")
+            if favitem == dlitem:
+                #print(f"Match! {favitem} - {dlitem}")
+                print(f"{dlitem}.replace('\\n', '\n'))")
+                #sys.stdout.write('MATCH!')
+    #-------------------------------------------------------------------------#
+                    
+        #******************************************************************
+        #******************STRIP UNWANTED CHARACTERS***********************
+        #******************************************************************
+       
+    #-------------------------------------------------------------------------#
+                #Display Sign Name
+                
+                a = str(dl_sign_name[dlsigncounter])
+                new_string = a.replace("[", "") #Remove left square brackets
+                a = new_string
+                new_string = a.replace("]", "") #Remove right square brackets
+                a = new_string
+                new_string = a.replace('"', "") #Remove double quotes
+                a = new_string
+                new_string = a.replace("'", "") #Remove single quotes
+                a = new_string
+                print(center_multiline_string(new_string,int(characters_per_line)))
+                
+                ### Change color to red for sign name
+                matrixportal.set_text_color("#0000FF")
+                
+                matrixportal.set_text(center_multiline_string(a.replace('\\n', '\n'),characters_per_line))
+                
+                c=a.replace('\\n', '\n')
+                
+                time.sleep(3)
+          
+
+                #Display Sign Message
+                matrixportal.set_text_color(sign_text_color) #Change sign color back 
+                a = str(dl_sign_messages[dlsigncounter])
+                new_string = a.replace("[", "") #Remove left square brackets
+                a = new_string
+                new_string = a.replace("]", "") #Remove right square brackets
+                a = new_string
+                new_string = a.replace('"', "") #Remove double quotes
+                a = new_string
+                new_string = a.replace("'", "") #Remove single quotes
+                a = new_string
+                print(center_multiline_string(new_string,int(characters_per_line)))
+                matrixportal.set_text(center_multiline_string(a.replace('\\n', '\n'),characters_per_line))
+                c=a.replace('\\n', '\n')
+                
+                time.sleep(10)
+          
+    print("Completed!")
+    
+while True:
+    cycles = cycles + 1
+    print(f"************** Executing Cycle # {cycles}")
+    main_program()
+
