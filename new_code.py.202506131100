@@ -10,7 +10,7 @@ import sys
 from adafruit_matrixportal.matrixportal import MatrixPortal #
 import json
 import microcontroller
-### TEST 6/13/2025 ###
+### TEST OF OTA UPDATE - THIS IS THE UPDATED OTA VERSION ###
 cycles = (0) #Counter that tracks how many cycles the main program has executed for troubleshooting
 
 def main_program():
