@@ -10,7 +10,8 @@ import sys
 from adafruit_matrixportal.matrixportal import MatrixPortal #
 import json
 import microcontroller
-### TEST OF OTA UPDATE - THIS IS THE UPDATED OTA VERSION ###
+
+##### NEW CODE TEST 6/27/2025 ######
 cycles = (0) #Counter that tracks how many cycles the main program has executed for troubleshooting
 
 def main_program():
@@ -328,4 +329,5 @@ while True:
     cycles = cycles + 1
     print(f"************** Executing Cycle # {cycles}")
     main_program()
+
 
