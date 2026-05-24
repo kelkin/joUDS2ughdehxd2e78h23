@@ -14,7 +14,8 @@ Fixes & Enhancements:
 - Integrated Manifest-Based GitHub OTA (Over-The-Air) automatic self-update engine.
 - Defensive try/except imports to allow auto-bootstrapping missing libraries.
 - Integrated Local Web Configuration Server (runs if libraries are present).
-- Displays visual Wi-Fi status and splits/centers the IP address on bootup.
+- Displays visual Wi-Fi status, splits/centers the IP address, and shows local/cloud
+  versions on the matrix screen during bootup.
 """
 
 import ssl
@@ -193,6 +194,15 @@ def perform_ota_check(requests_session, force=False):
         return
 
     print(f"Checking updates via Manifest... Local Version: {LOCAL_VERSION}")
+    
+    # 1. Visually display local version on the matrix screen
+    matrixportal.set_text_color("#FFFF00")  # Yellow
+    matrixportal.set_text(center_multiline_string(f"LOCAL\nv{LOCAL_VERSION}", characters_per_line))
+    for _ in range(2):
+         w.feed()
+         time.sleep(1)
+
+    # 2. Show the standard checking updates text
     matrixportal.set_text_color("#FFFF00")  # Yellow
     matrixportal.set_text(center_multiline_string("CHECKING\nUPDATE", characters_per_line))
     
@@ -208,6 +218,13 @@ def perform_ota_check(requests_session, force=False):
             files_to_download = manifest_data.get("files", {})
             
             print(f"Remote version found on GitHub: '{remote_version}'")
+            
+            # 3. Visually display remote version on the matrix screen
+            matrixportal.set_text_color("#FFFF00")  # Yellow
+            matrixportal.set_text(center_multiline_string(f"CLOUD\nv{remote_version}", characters_per_line))
+            for _ in range(2):
+                 w.feed()
+                 time.sleep(1)
             
             if remote_version != LOCAL_VERSION or force:
                 print("Update triggered! Starting multi-file download bootstrap...")
@@ -262,6 +279,12 @@ def perform_ota_check(requests_session, force=False):
                 microcontroller.reset()
             else:
                 print("Your firmware is completely up to date!")
+                # 4. Visual confirmation that everything is matched and current
+                matrixportal.set_text_color("#00FF00")  # Green
+                matrixportal.set_text(center_multiline_string("UP TO\nDATE", characters_per_line))
+                for _ in range(2):
+                     w.feed()
+                     time.sleep(1)
         else:
             print(f"Failed to fetch remote manifest: HTTP {response.status_code}")
     except Exception as ex:
