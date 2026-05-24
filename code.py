@@ -749,3 +749,34 @@ while True:
     # 5. Non-blocking sleep interval while polling web server rapidly
     print("Cycle completed. Sleeping and listening for web connections...")
     safe_delay(30)
+```
+eof
+
+---
+
+### Step 2: Paste the Updated Manifest into your GitHub Repository (`version.txt`)
+
+To force the board to actually pull the newly added HTTPServer package library files, copy the updated JSON manifest below and save/commit it over your **`version.txt`** file on GitHub. Note the version number is bumped to `"1.1.8"`, which matches `LOCAL_VERSION` on line 24 of your new code.
+
+```json
+{
+  "version": "1.1.9",
+  "files": {
+    "code.py": "https://raw.githubusercontent.com/kelkin/TrafficMatrixNY/main/code.py",
+    "lib/adafruit_logging.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_Logging/main/adafruit_logging.py",
+    "lib/adafruit_ticks.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_Ticks/main/adafruit_ticks.py",
+    "lib/adafruit_httpserver/__init__.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/__init__.py",
+    "lib/adafruit_httpserver/authentication.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/authentication.py",
+    "lib/adafruit_httpserver/exceptions.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/exceptions.py",
+    "lib/adafruit_httpserver/headers.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/headers.py",
+    "lib/adafruit_httpserver/httpserver.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/httpserver.py",
+    "lib/adafruit_httpserver/interfaces.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/interfaces.py",
+    "lib/adafruit_httpserver/methods.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/methods.py",
+    "lib/adafruit_httpserver/mime_types.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/mime_types.py",
+    "lib/adafruit_httpserver/request.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/request.py",
+    "lib/adafruit_httpserver/response.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/response.py",
+    "lib/adafruit_httpserver/route.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/route.py",
+    "lib/adafruit_httpserver/server.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/server.py",
+    "lib/adafruit_httpserver/status.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/status.py"
+  }
+}
