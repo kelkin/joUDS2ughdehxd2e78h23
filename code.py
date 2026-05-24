@@ -27,7 +27,7 @@ Fixes & Enhancements:
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
 # Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
-LOCAL_VERSION = "1.1.9"  
+LOCAL_VERSION = "1.1.10"  
 
 import ssl
 import wifi
@@ -223,27 +223,50 @@ def clean_string(text):
 server = None
 rescue_socket = None
 
+def start_rescue_server():
+    """Initializes the raw socket Emergency Rescue Server on Port 80."""
+    global rescue_socket, pool
+    if rescue_socket is None:
+        try:
+            rescue_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
+            rescue_socket.settimeout(0.05)  # Short non-blocking timeout
+            
+            # Request socket port reuse (helps prevent "Address already in use" errors)
+            try:
+                import socket
+                rescue_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            except Exception:
+                pass
+                
+            rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
+            rescue_socket.listen(3)  # Increase backlog to handle parallel browser threads
+            print("Emergency Rescue Web Server initialized on Port 80.")
+        except Exception as e:
+            print(f"Could not bind Emergency Rescue Server: {e}")
+
 def poll_rescue_server():
     """Emergency Lightweight Web Server.
     Served via raw sockets so it still runs even if adafruit_httpserver dependencies are broken!
+    Optimized to handle multiple browser connections and reject favicon probes cleanly.
     """
     global rescue_socket
     if not HAS_HTTPSERVER and rescue_socket is not None:
+        conn = None
         try:
             conn, addr = rescue_socket.accept()
-            conn.settimeout(1.0)
+            conn.settimeout(0.5)
             
-            # Read incoming request headers
+            # Read incoming request headers safely
             request_str = ""
             try:
-                request = conn.recv(1024)
+                request = conn.recv(512)
                 if request:
                     request_str = request.decode("utf-8")
             except Exception:
                 pass
             
-            # Drop favicon requests immediately so the browser doesn't block the connection!
-            if "favicon.ico" in request_str:
+            # Fast-path rejection of favicon.ico or non-root paths to prevent port congestion
+            if "favicon.ico" in request_str or (request_str and "GET / " not in request_str and "GET /logs" not in request_str):
                 try:
                     conn.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("utf-8"))
                     conn.close()
@@ -251,7 +274,7 @@ def poll_rescue_server():
                     pass
                 return
             
-            print(f"Rescue connection from {addr}")
+            print(f"Rescue connection accepted from {addr}")
             
             # Retrieve traceback from file
             try:
@@ -262,9 +285,8 @@ def poll_rescue_server():
                 
             log_content = web_logger.get_logs()
             
-            # Construct diagnostic HTML rescue interface
-            html = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-            html += f"""<!DOCTYPE html>
+            # Construct a highly optimized diagnostic response
+            body = f"""<!DOCTYPE html>
             <html>
             <head>
                 <title>Emergency Rescue Console</title>
@@ -282,23 +304,37 @@ def poll_rescue_server():
                 <h1>🚨 S3 Matrix Portal - Emergency Rescue Console</h1>
                 <p style="color:#aaa;">The main web server library failed to load, so the system is running in <span class="tag">Rescue Mode</span>.</p>
                 
-                <h2>1. Startup Import Error Traceback (The Bug):</h2>
+                <h2>1. Startup Import/OTA Error Traceback (The Bug):</h2>
                 <pre>{err_content}</pre>
                 
                 <h2>2. Diagnostic Console & Download Logs:</h2>
                 <pre class="logs">{log_content}</pre>
                 
-                <p><a href="#" onclick="window.location.reload();" class="btn">Refresh Diagnostic Page</a></p>
+                <p><a href="#" onclick="window.location.reload();" class="btn">Refresh Diagnostics</a></p>
             </body>
             </html>
             """
-            conn.send(html.encode("utf-8"))
+            
+            # Send standard HTTP response headers with accurate Content-Length
+            response_bytes = body.encode("utf-8")
+            headers = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(response_bytes)}\r\nConnection: close\r\n\r\n"
+            
+            try:
+                conn.send(headers.encode("utf-8"))
+                conn.send(response_bytes)
+            except Exception as send_err:
+                print(f"Error sending payload: {send_err}")
+                
             conn.close()
         except OSError:
-            # Normal socket timeout when no connection is incoming
             pass
         except Exception as ex:
             print(f"Error handling rescue server: {ex}")
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 def safe_delay(seconds):
     """Delays execution for specified seconds without blocking.
@@ -373,14 +409,7 @@ if connect_wifi():
 
     # Initialize Emergency Rescue Server if the standard libraries are missing/broken
     if not HAS_HTTPSERVER:
-        try:
-            rescue_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
-            rescue_socket.settimeout(0.05)  # Short non-blocking timeout
-            rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
-            rescue_socket.listen(1)
-            print("Emergency Rescue Web Server initialized on Port 80.")
-        except Exception as e:
-            print(f"Could not bind Emergency Rescue Server: {e}")
+        start_rescue_server()
 
     # Format and show the IP Address on Line 1, and the SSID on Line 2
     try:
@@ -520,14 +549,29 @@ def perform_ota_check(requests_session, force=False):
     except Exception as ex:
         print(f"Error during Manifest OTA check: {ex}")
         log_exception(ex)
+        
+        # Write traceback to boot_error.txt so the user can diagnose the OTA check error from bed!
         try:
-            # Safely extract and format the exception name to display on the matrix screen
-            err_name = type(ex).__name__.replace("Error", "")
+            with open("boot_error.txt", "w") as f:
+                import io
+                import traceback
+                traceback.print_exception(ex, file=f)
+        except Exception as write_err:
+            print(f"Failed to write boot_error.txt: {write_err}")
+            
+        try:
+            # Safely extract exception name without type(ex).__name__ which fails in CircuitPython
+            ex_str = repr(ex)
+            err_name = ex_str.split('(')[0] if '(' in ex_str else ex_str.split(' ')[0]
+            err_name = err_name.replace("<class '", "").replace("'>", "").replace("Error", "")
+            if not err_name:
+                err_name = "ERR"
+            
             matrixportal.set_text_color("#FF0000")  # Red
             matrixportal.set_text(center_multiline_string(f"OTA ERR\n{err_name[:10]}", characters_per_line))
             safe_delay(3)
-        except Exception:
-            pass
+        except Exception as display_err:
+            print(f"Failed to show OTA error on screen: {display_err}")
     finally:
         if response is not None:
             try:
@@ -634,6 +678,7 @@ if HAS_HTTPSERVER:
     except Exception as server_init_err:
         print(f"Failed to start local server: {server_init_err}")
         HAS_HTTPSERVER = False
+        start_rescue_server()  # Fallback: instantly bind Emergency socket if start fails!
 
 w.feed()
 
