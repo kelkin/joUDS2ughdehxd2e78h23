@@ -17,7 +17,7 @@ Fixes & Enhancements:
 - Writes startup tracebacks to boot_error.txt to allow offline USB debugging.
 - Integrated Local Web Configuration Server (runs if libraries are present).
 - Uses a non-blocking fast-polling safe_delay function to ensure port 80 is responsive.
-- Displays visual Wi-Fi status, splits/centers the IP address, and shows local/cloud
+- Displays visual Wi-Fi status, full IP address on line 1, connected SSID on line 2, and
   versions along with Web Server status on the matrix screen during bootup.
 - Captures print statements into a sliding RAM buffer and serves a live console web page on `/logs`.
 - Overrides the built-in print() function globally to avoid write-protected sys.stdout limits.
@@ -155,7 +155,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.4"  # Synchronized to your latest working version!
+LOCAL_VERSION = "1.1.5"  # Incremented to 1.1.5 to trigger wireless bootstrap of the missing library!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
@@ -282,17 +282,15 @@ def ensure_dir_exists(filepath):
 # --- Initial Network Connection ---
 gc.collect()
 if connect_wifi():
-    # Format and show the IP Address nicely split across two lines on the LED panel
+    # Format and show the IP Address on Line 1, and the SSID on Line 2
     try:
         ip_str = str(wifi.radio.ipv4_address)
-        octets = ip_str.split('.')
-        if len(octets) == 4:
-            # Split "192.168.100.24" into "192.168." and "100.24" to fit characters_per_line nicely
-            ip_display = f"{octets[0]}.{octets[1]}.\n{octets[2]}.{octets[3]}"
-        else:
-            ip_display = ip_str
+        ssid_str = str(secrets.get("ssid", "WIFI"))
         
-        # Display IP on matrix in green
+        # Keep full IP on line 1, and SSID on line 2
+        ip_display = f"{ip_str}\n{ssid_str}"
+        
+        # Display IP and SSID on matrix in green
         matrixportal.set_text_color("#00FF00")
         matrixportal.set_text(center_multiline_string(ip_display, characters_per_line))
         safe_delay(5)
