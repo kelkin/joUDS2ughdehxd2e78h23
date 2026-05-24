@@ -104,12 +104,51 @@ def print(*args, **kwargs):
 def log_exception(e):
     try:
         import io
-        import traceback
         stream = io.StringIO()
-        traceback.print_exception(e, file=stream)
+        sys.print_exception(e, stream)
         print(stream.getvalue())
     except Exception:
         print(f"Exception logging failed. Raw exception: {e}")
+
+# --- Deep Library File Verification Inspector ---
+# Scans files inside /lib/adafruit_httpserver to verify they aren't missing or empty (0 bytes)
+def check_httpserver_files():
+    expected_files = [
+        "__init__.py", "authentication.py", "exceptions.py", "headers.py",
+        "httpserver.py", "interfaces.py", "methods.py", "mime_types.py",
+        "request.py", "response.py", "route.py", "server.py", "status.py"
+    ]
+    file_status = []
+    folder_exists = False
+    try:
+        os.stat("/lib/adafruit_httpserver")
+        folder_exists = True
+        file_status.append("📂 /lib/adafruit_httpserver: Directory exists")
+    except OSError:
+        file_status.append("❌ /lib/adafruit_httpserver: Directory MISSING!")
+        
+    if folder_exists:
+        for filename in expected_files:
+            filepath = f"/lib/adafruit_httpserver/{filename}"
+            try:
+                stats = os.stat(filepath)
+                size = stats[6]  # File size in bytes
+                if size == 0:
+                    file_status.append(f"⚠️  {filename}: EMPTY (0 bytes)")
+                else:
+                    file_status.append(f"✅  {filename}: OK ({size} bytes)")
+            except OSError:
+                file_status.append(f"❌  {filename}: MISSING")
+                
+    # Check general core library dependencies
+    for dep in ["adafruit_logging.py", "adafruit_ticks.py"]:
+        try:
+            stats = os.stat(f"/lib/{dep}")
+            file_status.append(f"✅  {dep}: OK ({stats[6]} bytes)")
+        except OSError:
+            file_status.append(f"❌  {dep}: MISSING")
+            
+    return file_status
 
 print("Wireless stdout logging activated.")
 
@@ -124,18 +163,21 @@ except Exception as e:
     print("\n" + "="*60)
     print("WARNING: adafruit_httpserver library failed to load.")
     print(f"Error detail: {e}")
-    print("This usually means a dependency like 'adafruit_logging' is missing or corrupt.")
     print("Please inspect the traceback below for details:")
     print("="*60)
     log_exception(e)
     print("="*60 + "\n")
     
-    # 1. Write traceback to boot_error.txt for offline USB debugging
+    # 1. Write traceback & file checklist to boot_error.txt for offline USB debugging
     try:
         with open("boot_error.txt", "w") as f:
             import io
-            import traceback
-            traceback.print_exception(e, file=f)
+            sys.print_exception(e, f)
+            f.write("\n" + "="*50 + "\n")
+            f.write("Local Library Verification Checklist:\n")
+            f.write("="*50 + "\n")
+            for status in check_httpserver_files():
+                f.write(status + "\n")
     except Exception as write_err:
         print(f"Failed to write boot_error.txt: {write_err}")
     
@@ -276,7 +318,7 @@ def poll_rescue_server():
             
             print(f"Rescue connection accepted from {addr}")
             
-            # Retrieve traceback from file
+            # Retrieve traceback and file verification checklist from file
             try:
                 with open("boot_error.txt", "r") as f:
                     err_content = f.read()
@@ -304,7 +346,7 @@ def poll_rescue_server():
                 <h1>🚨 S3 Matrix Portal - Emergency Rescue Console</h1>
                 <p style="color:#aaa;">The main web server library failed to load, so the system is running in <span class="tag">Rescue Mode</span>.</p>
                 
-                <h2>1. Startup Import/OTA Error Traceback (The Bug):</h2>
+                <h2>1. Startup Diagnostic Checklist & Error Traceback:</h2>
                 <pre>{err_content}</pre>
                 
                 <h2>2. Diagnostic Console & Download Logs:</h2>
@@ -455,7 +497,8 @@ def perform_ota_check(requests_session, force=False):
     response = None
     try:
         w.feed()
-        response = requests_session.get(MANIFEST_URL, timeout=15)
+        # Non-blocking optimization: Reduce timeout to 5 seconds so the browser never hangs!
+        response = requests_session.get(MANIFEST_URL, timeout=5)
         if response.status_code == 200:
             manifest_data = response.json()
             w.feed()
@@ -490,7 +533,8 @@ def perform_ota_check(requests_session, force=False):
                     
                     file_response = None
                     try:
-                        file_response = requests_session.get(remote_url, timeout=20)
+                        # Non-blocking optimization: Timeout reduced to 5 seconds per file download
+                        file_response = requests_session.get(remote_url, timeout=5)
                         if file_response.status_code == 200:
                             file_content = file_response.text
                             w.feed()
@@ -550,12 +594,16 @@ def perform_ota_check(requests_session, force=False):
         print(f"Error during Manifest OTA check: {ex}")
         log_exception(ex)
         
-        # Write traceback to boot_error.txt so the user can diagnose the OTA check error from bed!
+        # Write traceback and deep folder verification to boot_error.txt
         try:
             with open("boot_error.txt", "w") as f:
                 import io
-                import traceback
-                traceback.print_exception(ex, file=f)
+                sys.print_exception(ex, f)
+                f.write("\n" + "="*50 + "\n")
+                f.write("Local Library Verification Checklist:\n")
+                f.write("="*50 + "\n")
+                for status in check_httpserver_files():
+                    f.write(status + "\n")
         except Exception as write_err:
             print(f"Failed to write boot_error.txt: {write_err}")
             
@@ -729,7 +777,8 @@ while True:
     print(f"Fetching data from API...")
     response = None
     try:
-        response = requests.get(DATA_SOURCE_URL, timeout=15)
+        # Non-blocking optimization: Timeout reduced to 5 seconds so the browser connection doesn't drop!
+        response = requests.get(DATA_SOURCE_URL, timeout=5)
         w.feed()
 
         if response.status_code == 200:
