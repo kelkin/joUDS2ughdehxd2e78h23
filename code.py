@@ -11,10 +11,15 @@ Fixes & Enhancements:
 - Fallback Submodule Import Engine to handle mismatched package exports natively.
 - Exponential backoff retry engine to handle DHCP and DNS settle delays smoothly.
 - Robust Socket Constant Fallback (AF_INET/SOCK_STREAM) for resilient Rescue Server binding.
+- Chunked Socket Streaming Engine in Rescue Server to prevent out-of-memory (OOM) fragmentation.
+- Aggressive memory reclamation (explicitly purging massive JSON dicts from RAM).
+- Graceful TCP Preconnection handling to resolve Firefox empty response errors.
+- Warning-free exception tracebacks optimized for CircuitPython 9.x.
+- Shadow Library Cleanup Engine to delete obsolete single-file modules.
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.15"  
+LOCAL_VERSION = "1.1.16"  
 
 import ssl
 import wifi
@@ -28,6 +33,14 @@ import os
 from microcontroller import watchdog as w
 from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
+
+# --- Shadow Library Cleanup ---
+# Deletes leftover old single-file adafruit_httpserver.py which shadows folder imports!
+try:
+    os.remove("/lib/adafruit_httpserver.py")
+    print("Cleaned up shadowed single-file adafruit_httpserver.py.")
+except OSError:
+    pass
 
 # --- Stream Redirector for Wireless Logging ---
 class WebLogger:
@@ -74,12 +87,19 @@ def print(*args, **kwargs):
 
 def log_exception(e):
     try:
+        import traceback
         import io
         stream = io.StringIO()
-        sys.print_exception(e, stream)
+        traceback.print_exception(e, limit=None, file=stream)
         print(stream.getvalue())
     except Exception:
-        print(f"Exception logging failed: {e}")
+        try:
+            import io
+            stream = io.StringIO()
+            sys.print_exception(e, stream)
+            print(stream.getvalue())
+        except Exception as ex:
+            print(f"Exception logging failed: {e}")
 
 # --- Defensive Imports for Web Server Bootstrap ---
 web_error_message = ""
@@ -181,7 +201,27 @@ def start_rescue_server():
             print(f"Rescue binding failed: {e}")
             rescue_socket = None
 
+def safe_send(conn, data):
+    """Sends arbitrary bytes/strings over a TCP socket reliably without truncating."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    bytes_sent = 0
+    while bytes_sent < len(data):
+        try:
+            sent = conn.send(data[bytes_sent:])
+            if sent == 0:
+                break
+            bytes_sent += sent
+        except OSError as e:
+            if e.errno == 11:  # EAGAIN, let socket catch its breath
+                time.sleep(0.01)
+                continue
+            raise e
+
 def poll_rescue_server():
+    """Emergency Lightweight Web Server.
+    Streams pages to clients dynamically to prevent RAM spike crashes.
+    """
     global rescue_socket
     if not HAS_HTTPSERVER and rescue_socket is not None:
         conn = None
@@ -189,11 +229,26 @@ def poll_rescue_server():
             conn, addr = rescue_socket.accept()
             conn.settimeout(0.5)
             request_str = ""
-            try:
-                request = conn.recv(512)
-                if request: request_str = request.decode("utf-8")
-            except Exception: pass
             
+            # Settle Handshake: Read incoming headers over multiple passes for slow browser preconnections
+            for _ in range(3):
+                try:
+                    request = conn.recv(512)
+                    if request:
+                        request_str = request.decode("utf-8")
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.05)
+            
+            # Gracefully ignore empty browser preconnection checks to prevent 200 OK empty faults
+            if not request_str:
+                try:
+                    conn.close()
+                except Exception: pass
+                return
+            
+            # Fast-path drop of favicons to preserve connection sockets
             if "favicon.ico" in request_str or (request_str and "GET / " not in request_str and "GET /logs" not in request_str):
                 try:
                     conn.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("utf-8"))
@@ -201,12 +256,30 @@ def poll_rescue_server():
                 except Exception: pass
                 return
             
-            log_content = web_logger.get_logs()
-            body = f"""<!DOCTYPE html><html><head><title>Rescue Console</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{{font-family:monospace;background-color:#111;color:#ff3333;margin:20px;}}pre{{background-color:#000;padding:15px;border-radius:5px;border:1px solid #333;overflow-x:auto;white-space:pre-wrap;color:#00ff00;}}</style></head><body><h1>🚨 Matrix Portal S3 - Rescue System</h1><h2>System Diagnostic & Download Logs:</h2><pre>{log_content}</pre></body></html>"""
-            response_bytes = body.encode("utf-8")
-            headers = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(response_bytes)}\r\nConnection: close\r\n\r\n"
-            conn.send(headers.encode("utf-8"))
-            conn.send(response_bytes)
+            print(f"Rescue connection accepted from {addr}")
+            
+            # 1. Send HTTP Response Headers immediately with UTF-8 charset!
+            safe_send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
+            
+            # 2. Stream Page Header in small chunks
+            safe_send(conn, "<!DOCTYPE html><html><head><title>Rescue Console</title>")
+            safe_send(conn, "<meta name='viewport' content='width=device-width, initial-scale=1'>")
+            safe_send(conn, "<style>body{font-family:monospace;background-color:#111;color:#ff3333;margin:20px;line-height:1.4;}")
+            safe_send(conn, "pre{background-color:#000;padding:15px;border-radius:5px;border:1px solid #333;overflow-x:auto;white-space:pre-wrap;color:#00ff00;}</style></head>")
+            safe_send(conn, "<body><h1>🚨 Matrix Portal S3 - Rescue System</h1>")
+            safe_send(conn, "<h2>System Diagnostic & Download Logs:</h2><pre>")
+            
+            # 3. Stream web_logger line-by-line directly to socket (0-string allocation!)
+            for line in web_logger.buffer:
+                safe_send(conn, line + "\n")
+            if web_logger.current_line:
+                safe_send(conn, web_logger.current_line)
+                
+            # 4. Stream Page Footer
+            safe_send(conn, "</pre></body></html>")
+            
+            # Give TCP stacks a brief moment to fully flush buffers before terminating socket
+            time.sleep(0.15)
             conn.close()
         except OSError: pass
         except Exception as ex:
@@ -214,6 +287,8 @@ def poll_rescue_server():
             if conn:
                 try: conn.close()
                 except Exception: pass
+        finally:
+            gc.collect()  # Flush socket cache immediately!
 
 def safe_delay(seconds):
     start_time = time.monotonic()
@@ -406,11 +481,16 @@ while True:
 
     print("Querying NY511 API...")
     response = None
+    json_data = None
     try:
         response = requests.get(DATA_SOURCE_URL, timeout=8)
         if response.status_code == 200:
+            print("API fetch successful. Processing JSON payload...")
             json_data = response.json()
+            w.feed()
+            
             if isinstance(json_data, list):
+                print(f"Successfully parsed {len(json_data)} signs. Filtering matched signs...")
                 for fav_name in favsign_list:
                     w.feed()
                     for sign in json_data:
@@ -428,6 +508,7 @@ while True:
         print(f"API Loop error: {e}")
     finally:
         if response: response.close()
-        gc.collect()
+        json_data = None  # Reclaim massive JSON payload instantly from RAM!
+        gc.collect()      # Force flush!
 
     safe_delay(30)
