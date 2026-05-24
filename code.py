@@ -12,6 +12,7 @@ Fixes & Enhancements:
 - Implemented aggressive garbage collection to prevent memory exhaustion.
 - Integrated hardware Watchdog Timer to automatically reboot if frozen.
 - Keeps track of runtime cycles and recovers gracefully from network dropped states.
+- Integrated GitHub OTA (Over-The-Air) automatic self-update engine.
 """
 
 import ssl
@@ -33,11 +34,16 @@ except ImportError:
     print("WiFi secrets are kept in secrets.py, please add them there!")
     raise
 
-# URL construction
+# URL construction for Traffic Signs
 DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["url_suffix"])
 
+# --- OTA Update Configuration (GitHub) ---
+ENABLE_OTA = secrets.get("enable_ota", False)
+LOCAL_VERSION = "1.0.4"  # Set to 1.0.0 on the board to force a test update against your GitHub 1.0.2!
+VERSION_URL = secrets.get("github_version_url", "")
+CODE_URL = secrets.get("github_code_url", "")
+
 # Configuration settings
-LOCAL_VERSION = "1.0.3"
 debug = secrets.get("debug", 0)
 width = int(secrets.get("width", 64))
 height = int(secrets.get("height", 32))
@@ -47,7 +53,6 @@ characters_per_line = int(secrets.get("characters_per_line", 10))
 sign_text_color = secrets.get("sign_text_color", 0xF7B500)  # Road sign yellow
 
 # --- Initialize Hardware Watchdog Timer ---
-# If the ESP32 hangs for more than 45 seconds, the hardware will auto-reset the board
 w.timeout = 45.0
 w.mode = WatchDogMode.RESET
 w.feed()
@@ -115,6 +120,74 @@ pool = socketpool.SocketPool(wifi.radio)
 ssl_context = ssl.create_default_context()
 requests = adafruit_requests.Session(pool, ssl_context)
 
+# --- GitHub self-updating OTA function ---
+def perform_ota_check(requests_session):
+    if not ENABLE_OTA or not VERSION_URL or not CODE_URL:
+        print("OTA Updates are disabled or URLs are not configured in secrets.py.")
+        return
+
+    print(f"Checking for updates... Local Version: {LOCAL_VERSION}")
+    matrixportal.set_text_color("#FFFF00")  # Yellow
+    matrixportal.set_text(center_multiline_string("CHECKING\nUPDATE", characters_per_line))
+    
+    response = None
+    try:
+        w.feed()
+        response = requests_session.get(VERSION_URL, timeout=10)
+        if response.status_code == 200:
+            remote_version = response.text.strip()
+            print(f"Remote version found on GitHub: '{remote_version}'")
+            
+            if remote_version != LOCAL_VERSION:
+                print("New version available! Starting update download...")
+                matrixportal.set_text_color("#00FF00")  # Green
+                matrixportal.set_text(center_multiline_string("UPDATING\nCODE...", characters_per_line))
+                
+                # Close the version checker response stream
+                response.close()
+                w.feed()
+                
+                # Download new code.py
+                response = requests_session.get(CODE_URL, timeout=15)
+                if response.status_code == 200:
+                    new_code = response.text
+                    
+                    print("Attempting to overwrite code.py...")
+                    try:
+                        with open("code.py", "w") as f:
+                            f.write(new_code)
+                        print("Update complete! Rebooting board...")
+                        matrixportal.set_text_color("#00FF00")
+                        matrixportal.set_text(center_multiline_string("SUCCESS\nREBOOTING", characters_per_line))
+                        time.sleep(3)
+                        import microcontroller
+                        microcontroller.reset()
+                    except OSError as fs_err:
+                        print(f"Filesystem Write Error: {fs_err}")
+                        print("The board filesystem is write-locked (mounted read-only).")
+                        print("Make sure you have created 'boot.py' to allow microcontroller writing.")
+                        matrixportal.set_text_color("#FF0000")  # Red
+                        matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line))
+                        time.sleep(5)
+                else:
+                    print(f"Failed to fetch code.py: HTTP {response.status_code}")
+            else:
+                print("Your firmware is up to date!")
+        else:
+            print(f"Failed to fetch remote version: HTTP {response.status_code}")
+    except Exception as ex:
+        print(f"Error during OTA check: {ex}")
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        gc.collect()
+
+# Run the OTA check immediately after connecting to WiFi
+perform_ota_check(requests)
+
 # --- Load Preferred Sign List (ONCE at Startup) ---
 filename = "sign_list.txt"
 favsign_list = []
@@ -151,7 +224,6 @@ while True:
         print("WiFi disconnected. Reconnecting...")
         if not connect_wifi():
             print("Could not reconnect. Waiting 10 seconds...")
-            # Keep watchdog alive during wait
             for _ in range(10):
                 w.feed()
                 time.sleep(1)
@@ -170,7 +242,6 @@ while True:
             w.feed()
 
             if isinstance(json_data, list):
-                # Temporary containers for parsed API signs
                 api_signs = []
                 
                 for sign in json_data:
@@ -189,7 +260,6 @@ while True:
                 print("Checking for favorited sign matches...")
                 for fav_name in favsign_list:
                     w.feed()
-                    # Look for this favorite sign in our downloaded API data
                     for sign_data in api_signs:
                         if fav_name == sign_data['name']:
                             print(f"\nMATCH FOUND: {fav_name}")
@@ -204,7 +274,6 @@ while True:
                             matrixportal.set_text_color("#0000FF")
                             matrixportal.set_text(centered_name)
                             
-                            # Hold name on screen (feeds WDT)
                             for _ in range(3):
                                 w.feed()
                                 time.sleep(1)
@@ -212,7 +281,6 @@ while True:
                             # Clean and format the Sign Message
                             raw_msg = sign_data['messages']
                             clean_msg = clean_string(raw_msg)
-                            # Convert escaped \\n to real newlines
                             clean_msg = clean_msg.replace('\\n', '\n')
                             centered_msg = center_multiline_string(clean_msg, characters_per_line)
                             
@@ -221,7 +289,6 @@ while True:
                             matrixportal.set_text_color(sign_text_color)
                             matrixportal.set_text(centered_msg)
                             
-                            # Hold message on screen for 10 seconds (feeds WDT)
                             for _ in range(10):
                                 w.feed()
                                 time.sleep(1)
@@ -237,21 +304,18 @@ while True:
         traceback.print_exception(e)
 
     finally:
-        # Guarantee network connection closure to avoid socket resource leaks
         if response is not None:
             try:
                 response.close()
             except Exception:
                 pass
         
-        # Explicitly delete local references to big data payloads so GC can sweep them
         json_data = None
         api_signs = None
         gc.collect()
 
-    # 4. Safe sleep interval before next complete loop cycle (default 30 seconds)
+    # 4. Safe sleep interval
     print("Cycle completed. Sleeping...")
     for _ in range(30):
         w.feed()
         time.sleep(1)
-
