@@ -27,7 +27,7 @@ Fixes & Enhancements:
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
 # Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
-LOCAL_VERSION = "1.1.8"  
+LOCAL_VERSION = "1.1.9"  
 
 import ssl
 import wifi
