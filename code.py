@@ -14,6 +14,7 @@ Fixes & Enhancements:
 - Integrated Manifest-Based GitHub OTA (Over-The-Air) automatic self-update engine.
 - Defensive try/except imports to allow auto-bootstrapping missing libraries.
 - Prints exact tracebacks on import errors to help debug missing library dependencies.
+- Writes startup tracebacks to boot_error.txt to allow offline USB debugging.
 - Integrated Local Web Configuration Server (runs if libraries are present).
 - Uses a non-blocking fast-polling safe_delay function to ensure port 80 is responsive.
 - Displays visual Wi-Fi status, splits/centers the IP address, and shows local/cloud
@@ -107,6 +108,7 @@ def log_exception(e):
 print("Wireless stdout logging activated.")
 
 # --- Defensive Imports for Web Server Bootstrap ---
+web_error_message = ""
 try:
     from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
     HAS_HTTPSERVER = True
@@ -121,6 +123,25 @@ except Exception as e:
     print("="*60)
     log_exception(e)
     print("="*60 + "\n")
+    
+    # 1. Write traceback to boot_error.txt for offline USB debugging
+    try:
+        with open("boot_error.txt", "w") as f:
+            import io
+            import traceback
+            traceback.print_exception(e, file=f)
+    except Exception as write_err:
+        print(f"Failed to write boot_error.txt: {write_err}")
+    
+    # 2. Extract clean error message to show on Matrix display
+    err_str = str(e)
+    if "no module named" in err_str.lower():
+        parts = err_str.split("'")
+        missing_module = parts[1] if len(parts) > 1 else "library"
+        missing_module = missing_module.replace("adafruit_", "")
+        web_error_message = missing_module.upper()
+    else:
+        web_error_message = "ERROR"
 
 # --- Configuration & Secrets Setup ---
 try:
@@ -134,7 +155,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.3"  # Synchronized to your latest working version!
+LOCAL_VERSION = "1.1.4"  # Synchronized to your latest working version!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
@@ -285,8 +306,8 @@ try:
         matrixportal.set_text(center_multiline_string("WEB OK\nPORT 80", characters_per_line))
     else:
         matrixportal.set_text_color("#FF0000")  # Red
-        matrixportal.set_text(center_multiline_string("WEB ERR\nBOOTSTRAP", characters_per_line))
-    safe_delay(2)
+        matrixportal.set_text(center_multiline_string(f"WEB ERR\n{web_error_message}", characters_per_line))
+    safe_delay(3)
 except Exception:
     pass
 
@@ -355,6 +376,17 @@ def perform_ota_check(requests_session, force=False):
                             file_content = file_response.text
                             w.feed()
                             
+                            # Content-length validation to protect against file truncation
+                            content_length = file_response.headers.get("content-length")
+                            if content_length is not None:
+                                try:
+                                    expected_size = int(content_length)
+                                    actual_size = len(file_content.encode("utf-8"))
+                                    if actual_size != expected_size:
+                                        print(f"Warning: Size mismatch for {local_path}. Expected {expected_size} bytes, got {actual_size}")
+                                except Exception as len_err:
+                                    print(f"Content-Length check failed: {len_err}")
+                            
                             # Auto-create parent folders (like 'lib/adafruit_httpserver')
                             ensure_dir_exists(local_path)
                             
@@ -400,13 +432,10 @@ def perform_ota_check(requests_session, force=False):
                 pass
         gc.collect()
 
-# Run the update check at bootup.
-# SELF-HEALING BOOTSTRAP: If our web server libraries failed to import,
-# we automatically force a complete manifest repair download to self-heal!
-force_bootstrap = not HAS_HTTPSERVER
-if force_bootstrap:
-    print("Auto-triggering repair bootstrap to rebuild libraries...")
-perform_ota_check(requests, force=force_bootstrap)
+# Run the update check at bootup
+# NO FORCE BOOTSTRAP AT BOOT TO STOP THE INFINITE LOOP.
+# It checks updates normally now. If local matches cloud, it will safely skip!
+perform_ota_check(requests, force=False)
 
 # --- Initialize Web Server only if library is present ---
 if HAS_HTTPSERVER:
