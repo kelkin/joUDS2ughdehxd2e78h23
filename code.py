@@ -17,7 +17,7 @@ Fixes & Enhancements:
 - Writes startup tracebacks to boot_error.txt to allow offline USB debugging.
 - Integrated Local Web Configuration Server (runs if libraries are present).
 - Integrated an Emergency Raw Socket Rescue Server (runs if adafruit_httpserver fails)
-  to serve boot_error.txt and live logs on Port 80 over Wi-Fi.
+  to serve boot_error.txt and live logs on Port 80 over Wi-Fi. Discards favicon requests.
 - Uses a non-blocking fast-polling safe_delay function to ensure Port 80 is responsive.
 - Displays visual Wi-Fi status, full IP address on line 1, connected SSID on line 2, and
   versions along with Web Server status on the matrix screen during bootup.
@@ -27,7 +27,7 @@ Fixes & Enhancements:
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
 # Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
-LOCAL_VERSION = "1.1.7"  
+LOCAL_VERSION = "1.1.8"  
 
 import ssl
 import wifi
@@ -232,13 +232,26 @@ def poll_rescue_server():
         try:
             conn, addr = rescue_socket.accept()
             conn.settimeout(1.0)
-            print(f"Rescue connection from {addr}")
             
             # Read incoming request headers
+            request_str = ""
             try:
                 request = conn.recv(1024)
+                if request:
+                    request_str = request.decode("utf-8")
             except Exception:
                 pass
+            
+            # Drop favicon requests immediately so the browser doesn't block the connection!
+            if "favicon.ico" in request_str:
+                try:
+                    conn.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("utf-8"))
+                    conn.close()
+                except Exception:
+                    pass
+                return
+            
+            print(f"Rescue connection from {addr}")
             
             # Retrieve traceback from file
             try:
@@ -736,3 +749,4 @@ while True:
     # 5. Non-blocking sleep interval while polling web server rapidly
     print("Cycle completed. Sleeping and listening for web connections...")
     safe_delay(30)
+}
