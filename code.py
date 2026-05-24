@@ -749,4 +749,3 @@ while True:
     # 5. Non-blocking sleep interval while polling web server rapidly
     print("Cycle completed. Sleeping and listening for web connections...")
     safe_delay(30)
-}
