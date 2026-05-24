@@ -16,7 +16,9 @@ Fixes & Enhancements:
 - Prints exact tracebacks on import errors to help debug missing library dependencies.
 - Writes startup tracebacks to boot_error.txt to allow offline USB debugging.
 - Integrated Local Web Configuration Server (runs if libraries are present).
-- Uses a non-blocking fast-polling safe_delay function to ensure port 80 is responsive.
+- Integrated an Emergency Raw Socket Rescue Server (runs if adafruit_httpserver fails)
+  to serve boot_error.txt and live logs on Port 80 over Wi-Fi.
+- Uses a non-blocking fast-polling safe_delay function to ensure Port 80 is responsive.
 - Displays visual Wi-Fi status, full IP address on line 1, connected SSID on line 2, and
   versions along with Web Server status on the matrix screen during bootup.
 - Captures print statements into a sliding RAM buffer and serves a live console web page on `/logs`.
@@ -25,7 +27,7 @@ Fixes & Enhancements:
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
 # Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
-LOCAL_VERSION = "1.1.6"  
+LOCAL_VERSION = "1.1.7"  
 
 import ssl
 import wifi
@@ -217,13 +219,77 @@ def clean_string(text):
     cleaned = text.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
     return cleaned
 
-# Start listening for incoming local connections
+# Globals for server instances
 server = None
+rescue_socket = None
+
+def poll_rescue_server():
+    """Emergency Lightweight Web Server.
+    Served via raw sockets so it still runs even if adafruit_httpserver dependencies are broken!
+    """
+    global rescue_socket
+    if not HAS_HTTPSERVER and rescue_socket is not None:
+        try:
+            conn, addr = rescue_socket.accept()
+            conn.settimeout(1.0)
+            print(f"Rescue connection from {addr}")
+            
+            # Read incoming request headers
+            try:
+                request = conn.recv(1024)
+            except Exception:
+                pass
+            
+            # Retrieve traceback from file
+            try:
+                with open("boot_error.txt", "r") as f:
+                    err_content = f.read()
+            except Exception:
+                err_content = "No boot_error.txt found on flash memory."
+                
+            log_content = web_logger.get_logs()
+            
+            # Construct diagnostic HTML rescue interface
+            html = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+            html += f"""<!DOCTYPE html>
+            <html>
+            <head>
+                <title>Emergency Rescue Console</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {{ font-family: monospace; background-color: #111; color: #ff3333; margin: 20px; line-height: 1.4; font-size: 13px; }}
+                    h1 {{ color: #ffcc00; font-family: Arial, sans-serif; font-size: 20px; border-bottom: 2px solid #ffcc00; padding-bottom: 5px; }}
+                    pre {{ background-color: #000; padding: 15px; border-radius: 5px; border: 1px solid #333; overflow-x: auto; white-space: pre-wrap; color: #ff5555; }}
+                    .btn {{ display: inline-block; background-color: #00FF00; color: #000; font-weight: bold; padding: 10px 15px; border-radius: 5px; text-decoration: none; font-family: Arial, sans-serif; }}
+                    .logs {{ color: #00ff00; border-color: #005500; }}
+                    .tag {{ background-color: #ff3333; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; }}
+                </style>
+            </head>
+            <body>
+                <h1>🚨 S3 Matrix Portal - Emergency Rescue Console</h1>
+                <p style="color:#aaa;">The main web server library failed to load, so the system is running in <span class="tag">Rescue Mode</span>.</p>
+                
+                <h2>1. Startup Import Error Traceback (The Bug):</h2>
+                <pre>{err_content}</pre>
+                
+                <h2>2. Diagnostic Console & Download Logs:</h2>
+                <pre class="logs">{log_content}</pre>
+                
+                <p><a href="#" onclick="window.location.reload();" class="btn">Refresh Diagnostic Page</a></p>
+            </body>
+            </html>
+            """
+            conn.send(html.encode("utf-8"))
+            conn.close()
+        except OSError:
+            # Normal socket timeout when no connection is incoming
+            pass
+        except Exception as ex:
+            print(f"Error handling rescue server: {ex}")
 
 def safe_delay(seconds):
     """Delays execution for specified seconds without blocking.
-    Feeds the watchdog and polls the local web server rapidly (every 20ms)
-    to keep the connection highly responsive.
+    Feeds the watchdog and polls either the main web server or the emergency rescue server rapidly.
     """
     start_time = time.monotonic()
     while time.monotonic() - start_time < seconds:
@@ -233,7 +299,9 @@ def safe_delay(seconds):
                 server.poll()
             except Exception:
                 pass
-        time.sleep(0.02)  # Short sleep to prevent CPU exhaustion while allowing rapid polling
+        else:
+            poll_rescue_server()
+        time.sleep(0.02)  # Prevent CPU stalling, poll every 20ms
 
 def connect_wifi():
     """Connects/reconnects to the configured WiFi access point."""
@@ -282,18 +350,31 @@ def ensure_dir_exists(filepath):
                 if e.errno != 17:
                     raise e
 
-# --- Initial Network Connection ---
+# --- Initial Network Connection & System Initialization ---
 gc.collect()
 if connect_wifi():
+    # Setup sockets immediately after connecting to ensure Emergency services work
+    pool = socketpool.SocketPool(wifi.radio)
+    ssl_context = ssl.create_default_context()
+    requests = adafruit_requests.Session(pool, ssl_context)
+
+    # Initialize Emergency Rescue Server if the standard libraries are missing/broken
+    if not HAS_HTTPSERVER:
+        try:
+            rescue_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
+            rescue_socket.settimeout(0.05)  # Short non-blocking timeout
+            rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
+            rescue_socket.listen(1)
+            print("Emergency Rescue Web Server initialized on Port 80.")
+        except Exception as e:
+            print(f"Could not bind Emergency Rescue Server: {e}")
+
     # Format and show the IP Address on Line 1, and the SSID on Line 2
     try:
         ip_str = str(wifi.radio.ipv4_address)
         ssid_str = str(secrets.get("ssid", "WIFI"))
-        
-        # Keep full IP on line 1, and SSID on line 2
         ip_display = f"{ip_str}\n{ssid_str}"
         
-        # Display IP and SSID on matrix in green
         matrixportal.set_text_color("#00FF00")
         matrixportal.set_text(center_multiline_string(ip_display, characters_per_line))
         safe_delay(5)
@@ -311,11 +392,6 @@ try:
     safe_delay(3)
 except Exception:
     pass
-
-# Set up reusable sockets and request sessions
-pool = socketpool.SocketPool(wifi.radio)
-ssl_context = ssl.create_default_context()
-requests = adafruit_requests.Session(pool, ssl_context)
 
 # --- GitHub Manifest-Based Multi-File OTA function ---
 def perform_ota_check(requests_session, force=False):
