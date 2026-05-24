@@ -18,8 +18,8 @@ Fixes & Enhancements:
 - Uses a non-blocking fast-polling safe_delay function to ensure port 80 is responsive.
 - Displays visual Wi-Fi status, splits/centers the IP address, and shows local/cloud
   versions along with Web Server status on the matrix screen during bootup.
-- Captures stdout into a sliding RAM buffer and serves a live console web page on `/logs`.
-- ONLY redirects sys.stdout (and NOT sys.stderr) to prevent recursive boot crash loops.
+- Captures print statements into a sliding RAM buffer and serves a live console web page on `/logs`.
+- Overrides the built-in print() function globally to avoid write-protected sys.stdout limits.
 """
 
 import ssl
@@ -36,23 +36,14 @@ from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Stream Redirector for Wireless Logging ---
-# Captures all prints into a rolling text buffer in memory.
-# We ONLY redirect sys.stdout (and NOT sys.stderr) to prevent 
-# recursive crash loops during traceback print exceptions.
+# Captures prints into a rolling text buffer in memory.
 class WebLogger:
     def __init__(self, max_lines=60):
         self.buffer = []
         self.max_lines = max_lines
-        self.original_stdout = sys.stdout
         self.current_line = ""
 
     def write(self, message):
-        # Always pass through to the physical serial port first
-        try:
-            self.original_stdout.write(message)
-        except Exception:
-            pass
-        
         # Safe conversion of bytes/other types to clean string
         if isinstance(message, (bytes, bytearray)):
             try:
@@ -77,21 +68,41 @@ class WebLogger:
             while len(self.buffer) > self.max_lines:
                 self.buffer.pop(0)
 
-    def flush(self):
-        try:
-            self.original_stdout.flush()
-        except Exception:
-            pass
-
     def get_logs(self):
         all_lines = list(self.buffer)
         if self.current_line:
             all_lines.append(self.current_line)
         return "\n".join(all_lines)
 
-# Activate wireless stream redirection immediately on boot
+# Instantiate the web logger
 web_logger = WebLogger()
-sys.stdout = web_logger
+
+# --- Overriding Built-In Print globally for RAM Logging ---
+# We preserve a reference to the native print function so we can still output to Thonny/serial
+_original_print = print
+
+def print(*args, **kwargs):
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    message = sep.join(str(arg) for arg in args)
+    
+    # Save a copy inside our web logging buffer
+    web_logger.write(message + end)
+    
+    # Send it out to the physical serial terminal (Thonny)
+    _original_print(*args, **kwargs)
+
+# --- Exception Logging Helper ---
+# Formats traceback errors as a string so they can go through our custom print wrapper
+def log_exception(e):
+    try:
+        import io
+        import traceback
+        stream = io.StringIO()
+        traceback.print_exception(e, file=stream)
+        print(stream.getvalue())
+    except Exception:
+        print(f"Exception logging failed. Raw exception: {e}")
 
 print("Wireless stdout logging activated.")
 
@@ -108,8 +119,7 @@ except Exception as e:
     print("This usually means a dependency like 'adafruit_logging' is missing or corrupt.")
     print("Please inspect the traceback below for details:")
     print("="*60)
-    import traceback
-    traceback.print_exception(e)
+    log_exception(e)
     print("="*60 + "\n")
 
 # --- Configuration & Secrets Setup ---
@@ -381,8 +391,7 @@ def perform_ota_check(requests_session, force=False):
             print(f"Failed to fetch remote manifest: HTTP {response.status_code}")
     except Exception as ex:
         print(f"Error during Manifest OTA check: {ex}")
-        import traceback
-        traceback.print_exception(ex)
+        log_exception(ex)
     finally:
         if response is not None:
             try:
@@ -505,7 +514,7 @@ print(f"Attempting to load '{filename}'")
 try:
     with open(filename, "r") as f:
         for line in f:
-            sys.stdout.write('.')
+            print('.', end='')
             cleaned_line = line.strip()
             if cleaned_line:
                 favsign_list.append(cleaned_line)
@@ -605,8 +614,7 @@ while True:
 
     except Exception as e:
         print(f"An error occurred during API fetch or display cycle: {e}")
-        import traceback
-        traceback.print_exception(e)
+        log_exception(e)
 
     finally:
         if response is not None:
