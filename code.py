@@ -453,36 +453,3 @@ while True:
             except Exception:
                 pass
         time.sleep(1)
-```
-eof
-
----
-
-### How to set up and deploy this in your bed:
-
-Since you cannot physically plug the board into your laptop, we will use your board's currently running single-file update script to bootstrap this entire setup!
-
-#### Step 1: Push the new `code.py` to GitHub
-Take the code from the **Canvas** panel on the right, copy it, and push it directly to your GitHub repository under your `code.py` file.
-
-#### Step 2: Create `ota_manifest.json` on GitHub
-In the same repository, create a new file named `ota_manifest.json` containing the code below. This manifest specifies the overall version and tells the board where to download every single file it needs, including all components of the `adafruit_httpserver` library:
-
-```json
-{
-  "version": "1.1.0",
-  "files": {
-    "code.py": "https://raw.githubusercontent.com/kelkin/TrafficMatrixNY/main/code.py",
-    "lib/adafruit_httpserver/__init__.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/__init__.py",
-    "lib/adafruit_httpserver/authentication.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/authentication.py",
-    "lib/adafruit_httpserver/exceptions.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/exceptions.py",
-    "lib/adafruit_httpserver/headers.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/headers.py",
-    "lib/adafruit_httpserver/methods.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/methods.py",
-    "lib/adafruit_httpserver/mime_types.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/mime_types.py",
-    "lib/adafruit_httpserver/request.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/request.py",
-    "lib/adafruit_httpserver/response.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/response.py",
-    "lib/adafruit_httpserver/route.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/route.py",
-    "lib/adafruit_httpserver/server.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/server.py",
-    "lib/adafruit_httpserver/status.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/status.py"
-  }
-}
