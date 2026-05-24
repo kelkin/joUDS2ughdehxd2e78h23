@@ -52,7 +52,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.0.0"  # Update this when pushing new manifest to GitHub!
+LOCAL_VERSION = "1.1.0"  # Update this when pushing new manifest to GitHub!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
