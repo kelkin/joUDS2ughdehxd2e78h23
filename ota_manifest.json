@@ -8,6 +8,7 @@
     "lib/adafruit_httpserver/authentication.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/authentication.py",
     "lib/adafruit_httpserver/exceptions.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/exceptions.py",
     "lib/adafruit_httpserver/headers.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/headers.py",
+    "lib/adafruit_httpserver/interfaces.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/interfaces.py",
     "lib/adafruit_httpserver/methods.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/methods.py",
     "lib/adafruit_httpserver/mime_types.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/mime_types.py",
     "lib/adafruit_httpserver/request.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/request.py",
