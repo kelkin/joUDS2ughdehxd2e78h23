@@ -14,6 +14,7 @@ Fixes & Enhancements:
 - Integrated Manifest-Based GitHub OTA (Over-The-Air) automatic self-update engine.
 - Defensive try/except imports to allow auto-bootstrapping missing libraries.
 - Integrated Local Web Configuration Server (runs if libraries are present).
+- Displays visual Wi-Fi status and splits/centers the IP address on bootup.
 """
 
 import ssl
@@ -52,7 +53,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.0"  # Update this when pushing new manifest to GitHub!
+LOCAL_VERSION = "1.1.1"  # MATCHES the version inside ota_manifest.json to prevent bootloop!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
@@ -119,12 +120,25 @@ def connect_wifi():
 
     print(f"Connecting to WiFi {secrets['ssid']}...")
     try:
+        # Show cyan connecting message on display
+        matrixportal.set_text_color("#00FFFF")
+        matrixportal.set_text(center_multiline_string("CONNECTING\nWIFI...", characters_per_line))
+    except Exception:
+        pass
+
+    try:
         wifi.radio.connect(secrets["ssid"], secrets["password"])
         print(f"Connected! IP: {wifi.radio.ipv4_address}")
         w.feed()
         return True
     except Exception as e:
         print(f"WiFi Connection failed: {e}")
+        try:
+            # Show red failure message
+            matrixportal.set_text_color("#FF0000")
+            matrixportal.set_text(center_multiline_string("WIFI\nFAILED", characters_per_line))
+        except Exception:
+            pass
         return False
 
 def ensure_dir_exists(filepath):
@@ -147,7 +161,25 @@ def ensure_dir_exists(filepath):
 
 # --- Initial Network Connection ---
 gc.collect()
-connect_wifi()
+if connect_wifi():
+    # Format and show the IP Address nicely split across two lines on the LED panel
+    try:
+        ip_str = str(wifi.radio.ipv4_address)
+        octets = ip_str.split('.')
+        if len(octets) == 4:
+            # Split "192.168.100.47" into "192.168." and "100.47" to fit characters_per_line nicely
+            ip_display = f"{octets[0]}.{octets[1]}.\n{octets[2]}.{octets[3]}"
+        else:
+            ip_display = ip_str
+        
+        # Display IP on matrix in green for 5 seconds
+        matrixportal.set_text_color("#00FF00")
+        matrixportal.set_text(center_multiline_string(ip_display, characters_per_line))
+        for _ in range(5):
+            w.feed()
+            time.sleep(1)
+    except Exception as display_err:
+        print(f"Error displaying IP: {display_err}")
 
 # Set up reusable sockets and request sessions
 pool = socketpool.SocketPool(wifi.radio)
