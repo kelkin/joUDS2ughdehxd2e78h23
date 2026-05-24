@@ -13,6 +13,7 @@ Fixes & Enhancements:
 - Integrated hardware Watchdog Timer to automatically reboot if frozen.
 - Keeps track of runtime cycles and recovers gracefully from network dropped states.
 - Integrated GitHub OTA (Over-The-Air) automatic self-update engine.
+- Displays local and cloud versions on the LED matrix during the update check sequence.
 """
 
 import ssl
@@ -39,7 +40,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.0.4"  # Set to 1.0.0 on the board to force a test update against your GitHub 1.0.2!
+LOCAL_VERSION = "1.0.5"  # Update this when pushing new code to GitHub!
 VERSION_URL = secrets.get("github_version_url", "")
 CODE_URL = secrets.get("github_code_url", "")
 
@@ -127,16 +128,25 @@ def perform_ota_check(requests_session):
         return
 
     print(f"Checking for updates... Local Version: {LOCAL_VERSION}")
-    matrixportal.set_text_color("#FFFF00")  # Yellow
-    matrixportal.set_text(center_multiline_string("CHECKING\nUPDATE", characters_per_line))
+    
+    # 1. Display Current Local Version on Boot
+    matrixportal.set_text_color("#00FFFF")  # Cyan
+    matrixportal.set_text(center_multiline_string(f"LOCAL VER\n{LOCAL_VERSION}", characters_per_line))
+    time.sleep(2)
+    w.feed()
     
     response = None
     try:
-        w.feed()
         response = requests_session.get(VERSION_URL, timeout=10)
         if response.status_code == 200:
             remote_version = response.text.strip()
             print(f"Remote version found on GitHub: '{remote_version}'")
+            
+            # 2. Display Latest Cloud Version
+            matrixportal.set_text_color("#FFFF00")  # Yellow
+            matrixportal.set_text(center_multiline_string(f"CLOUD VER\n{remote_version}", characters_per_line))
+            time.sleep(2)
+            w.feed()
             
             if remote_version != LOCAL_VERSION:
                 print("New version available! Starting update download...")
@@ -157,15 +167,16 @@ def perform_ota_check(requests_session):
                         with open("code.py", "w") as f:
                             f.write(new_code)
                         print("Update complete! Rebooting board...")
-                        matrixportal.set_text_color("#00FF00")
-                        matrixportal.set_text(center_multiline_string("SUCCESS\nREBOOTING", characters_per_line))
-                        time.sleep(3)
+                        
+                        # 3. Display Successful Update State with the Target Version
+                        matrixportal.set_text_color("#00FF00")  # Green
+                        matrixportal.set_text(center_multiline_string(f"SUCCESS\nNEW: {remote_version}", characters_per_line))
+                        time.sleep(4)
+                        
                         import microcontroller
                         microcontroller.reset()
                     except OSError as fs_err:
                         print(f"Filesystem Write Error: {fs_err}")
-                        print("The board filesystem is write-locked (mounted read-only).")
-                        print("Make sure you have created 'boot.py' to allow microcontroller writing.")
                         matrixportal.set_text_color("#FF0000")  # Red
                         matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line))
                         time.sleep(5)
@@ -173,149 +184,5 @@ def perform_ota_check(requests_session):
                     print(f"Failed to fetch code.py: HTTP {response.status_code}")
             else:
                 print("Your firmware is up to date!")
-        else:
-            print(f"Failed to fetch remote version: HTTP {response.status_code}")
-    except Exception as ex:
-        print(f"Error during OTA check: {ex}")
-    finally:
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
-        gc.collect()
-
-# Run the OTA check immediately after connecting to WiFi
-perform_ota_check(requests)
-
-# --- Load Preferred Sign List (ONCE at Startup) ---
-filename = "sign_list.txt"
-favsign_list = []
-print(f"Attempting to load '{filename}'")
-
-try:
-    with open(filename, "r") as f:
-        for line in f:
-            sys.stdout.write('.')
-            cleaned_line = line.strip()
-            if cleaned_line:
-                favsign_list.append(cleaned_line)
-    print(f"\nSuccessfully loaded {len(favsign_list)} entries from '{filename}'.")
-except OSError as e:
-    print(f"\nError: Could not open or read file '{filename}'. Reason: {e}")
-    print("Please ensure 'sign_list.txt' exists in the root directory of the drive.")
-
-# --- Main Program Loop Context ---
-cycles = 0
-w.feed()
-
-while True:
-    cycles += 1
-    print(f"\n************************************************")
-    print(f"Executing Cycle # {cycles} - Free RAM: {gc.mem_free()} bytes")
-    print(f"************************************************")
-    w.feed()
-
-    # Always trigger GC to prevent heap fragmentation before networking tasks
-    gc.collect()
-
-    # 1. Verify connection status
-    if not wifi.radio.connected:
-        print("WiFi disconnected. Reconnecting...")
-        if not connect_wifi():
-            print("Could not reconnect. Waiting 10 seconds...")
-            for _ in range(10):
-                w.feed()
-                time.sleep(1)
-            continue
-
-    # 2. Fetch data from 511NY API
-    print(f"Fetching data from API...")
-    response = None
-    try:
-        response = requests.get(DATA_SOURCE_URL, timeout=15)
-        w.feed()
-
-        if response.status_code == 200:
-            print("API fetch successful. Processing JSON payload...")
-            json_data = response.json()
-            w.feed()
-
-            if isinstance(json_data, list):
-                api_signs = []
-                
-                for sign in json_data:
-                    if 'Name' in sign and 'Messages' in sign:
-                        api_signs.append({
-                            'id': sign.get('ID', ''),
-                            'name': sign['Name'],
-                            'roadway': sign.get('Roadway', ''),
-                            'direction': sign.get('DirectionOfTravel', ''),
-                            'messages': sign['Messages']
-                        })
-
-                print(f"Successfully loaded {len(api_signs)} signs from API.")
-                
-                # 3. Match signs and display them
-                print("Checking for favorited sign matches...")
-                for fav_name in favsign_list:
-                    w.feed()
-                    for sign_data in api_signs:
-                        if fav_name == sign_data['name']:
-                            print(f"\nMATCH FOUND: {fav_name}")
-                            
-                            # Clean and format the name
-                            raw_name = sign_data['name']
-                            clean_name = clean_string(raw_name)
-                            centered_name = center_multiline_string(clean_name, characters_per_line)
-                            
-                            # Display Sign Name in Blue
-                            print(f"Displaying Name:\n{centered_name}")
-                            matrixportal.set_text_color("#0000FF")
-                            matrixportal.set_text(centered_name)
-                            
-                            for _ in range(3):
-                                w.feed()
-                                time.sleep(1)
-
-                            # Clean and format the Sign Message
-                            raw_msg = sign_data['messages']
-                            clean_msg = clean_string(raw_msg)
-                            clean_msg = clean_msg.replace('\\n', '\n')
-                            centered_msg = center_multiline_string(clean_msg, characters_per_line)
-                            
-                            # Display Sign Message in road-sign yellow
-                            print(f"Displaying Message:\n{centered_msg}")
-                            matrixportal.set_text_color(sign_text_color)
-                            matrixportal.set_text(centered_msg)
-                            
-                            for _ in range(10):
-                                w.feed()
-                                time.sleep(1)
-
-            else:
-                print(f"Error: API returned unexpected structure: {type(json_data)}")
-        else:
-            print(f"API Error: Status code {response.status_code}")
-
-    except Exception as e:
-        print(f"An error occurred during API fetch or display cycle: {e}")
-        import traceback
-        traceback.print_exception(e)
-
-    finally:
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
-        
-        json_data = None
-        api_signs = None
-        gc.collect()
-
-    # 4. Safe sleep interval
-    print("Cycle completed. Sleeping...")
-    for _ in range(30):
-        w.feed()
-        time.sleep(1)
+                matrixportal.set_text_color("#00FF00")  # Green
+                matrixportal.set_text(center_multiline_string("VER VERIFIED\nUP TO DATE
