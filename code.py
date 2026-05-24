@@ -23,6 +23,10 @@ Fixes & Enhancements:
 - Overrides the built-in print() function globally to avoid write-protected sys.stdout limits.
 """
 
+# --- EASY ACCESS VERSION CONFIGURATION ---
+# Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
+LOCAL_VERSION = "1.1.6"  
+
 import ssl
 import wifi
 import socketpool
@@ -155,7 +159,6 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.5"  # Incremented to 1.1.5 to trigger wireless bootstrap of the missing library!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
@@ -413,9 +416,9 @@ def perform_ota_check(requests_session, force=False):
                 microcontroller.reset()
             else:
                 print("Your firmware is completely up to date!")
-                # 4. Visual confirmation that everything is matched and current
+                # 4. Visual confirmation that everything is matched and current (MODIFIED TO SINGLE LINE)
                 matrixportal.set_text_color("#00FF00")  # Green
-                matrixportal.set_text(center_multiline_string("UP TO\nDATE", characters_per_line))
+                matrixportal.set_text(center_multiline_string("UP TO DATE", characters_per_line))
                 safe_delay(2)
         else:
             print(f"Failed to fetch remote manifest: HTTP {response.status_code}")
@@ -431,8 +434,6 @@ def perform_ota_check(requests_session, force=False):
         gc.collect()
 
 # Run the update check at bootup
-# NO FORCE BOOTSTRAP AT BOOT TO STOP THE INFINITE LOOP.
-# It checks updates normally now. If local matches cloud, it will safely skip!
 perform_ota_check(requests, force=False)
 
 # --- Initialize Web Server only if library is present ---
