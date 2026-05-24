@@ -27,7 +27,7 @@ Fixes & Enhancements:
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
 # Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
-LOCAL_VERSION = "1.1.12"  
+LOCAL_VERSION = "1.1.11"  
 
 import ssl
 import wifi
@@ -115,8 +115,8 @@ def log_exception(e):
 def check_httpserver_files():
     expected_files = [
         "__init__.py", "authentication.py", "exceptions.py", "headers.py",
-        "httpserver.py", "interfaces.py", "methods.py", "mime_types.py",
-        "request.py", "response.py", "route.py", "server.py", "status.py"
+        "methods.py", "mime_types.py", "request.py", "response.py", 
+        "route.py", "server.py", "status.py"
     ]
     file_status = []
     folder_exists = False
@@ -190,14 +190,14 @@ except Exception as e:
         except Exception as write_err:
             print(f"Failed to write boot_error.txt: {write_err}")
         
-        # 2. Extract clean error message to show on Matrix display
-        err_str = str(fallback_err)
-        if "no module named" in err_str.lower():
-            parts = err_str.split("'")
-            missing_module = parts[1] if len(parts) > 1 else "library"
-            missing_module = missing_module.replace("adafruit_", "")
-            web_error_message = missing_module.upper()
-        else:
+        # 2. Extract exception class name safely to display on Matrix
+        try:
+            ex_repr = repr(fallback_err)
+            err_name = ex_repr.split("(")[0].split(".")[-1].replace("Error", "").upper()
+            if not err_name:
+                err_name = "ERROR"
+            web_error_message = err_name[:10]
+        except Exception:
             web_error_message = "ERROR"
 
 # --- Configuration & Secrets Setup ---
@@ -279,7 +279,8 @@ def start_rescue_server():
     global rescue_socket, pool
     if rescue_socket is None:
         try:
-            rescue_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
+            # Use module-level constants to be universally crash-proof across all board architectures
+            rescue_socket = pool.socket(socketpool.AF_INET, socketpool.SOCK_STREAM)
             rescue_socket.settimeout(0.02)  # Ultra short non-blocking timeout
             
             # Request socket port reuse (helps prevent "Address already in use" errors)
@@ -295,7 +296,7 @@ def start_rescue_server():
             try:
                 rescue_socket.listen(3)
             except TypeError:
-                rescue_socket.listen()  # Fallback for firmware versions rejecting integer limits
+                rescue_socket.listen()  # Fallback for older firmware rejecting backlog limits
                 
             print("Emergency Rescue Web Server initialized on Port 80.")
         except Exception as e:
@@ -511,10 +512,20 @@ def perform_ota_check(requests_session, force=False):
     matrixportal.set_text(center_multiline_string("CHECKING\nUPDATE", characters_per_line))
     
     response = None
-    try:
+    # Exponential backoff retry engine to let router DHCP tables fully resolve and settle
+    for retry in range(3):
         w.feed()
-        # Non-blocking optimization: Reduce timeout to 5 seconds so the browser never hangs!
-        response = requests_session.get(MANIFEST_URL, timeout=5)
+        try:
+            print(f"Fetching manifest (attempt {retry + 1}/3)...")
+            response = requests_session.get(MANIFEST_URL, timeout=8)
+            break
+        except Exception as ex:
+            if retry == 2:  # If final retry failed, let exception block handle it
+                raise ex
+            print("DNS / Route tables not settled yet. Waiting 2s...")
+            safe_delay(2)
+            
+    try:
         if response.status_code == 200:
             raw_text = response.text
             print(f"Fetched Manifest Raw Contents (first 150 chars): {raw_text[:150]}")
@@ -552,8 +563,7 @@ def perform_ota_check(requests_session, force=False):
                     
                     file_response = None
                     try:
-                        # Non-blocking optimization: Timeout reduced to 5 seconds per file download
-                        file_response = requests_session.get(remote_url, timeout=5)
+                        file_response = requests_session.get(remote_url, timeout=10)
                         if file_response.status_code == 200:
                             file_content = file_response.text
                             w.feed()
