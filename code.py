@@ -13,9 +13,11 @@ Fixes & Enhancements:
 - Integrated hardware Watchdog Timer to automatically reboot if frozen.
 - Integrated Manifest-Based GitHub OTA (Over-The-Air) automatic self-update engine.
 - Defensive try/except imports to allow auto-bootstrapping missing libraries.
+- Prints exact tracebacks on import errors to help debug missing library dependencies.
 - Integrated Local Web Configuration Server (runs if libraries are present).
+- Uses a non-blocking fast-polling safe_delay function to ensure port 80 is responsive.
 - Displays visual Wi-Fi status, splits/centers the IP address, and shows local/cloud
-  versions on the matrix screen during bootup.
+  versions along with Web Server status on the matrix screen during bootup.
 """
 
 import ssl
@@ -32,15 +34,24 @@ from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Defensive Imports for Web Server Bootstrap ---
-# If the library is missing, we flag it as False instead of crashing,
-# allowing the OTA updater to fetch the missing libraries on boot!
+# If the library or any of its dependencies (like adafruit_logging) is missing,
+# we flag it as False instead of crashing, print a detailed traceback to help debug,
+# and let the OTA updater bootstrap the missing files.
 try:
     from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
     HAS_HTTPSERVER = True
     print("Web server libraries loaded successfully.")
-except ImportError:
+except Exception as e:
     HAS_HTTPSERVER = False
-    print("WARNING: adafruit_httpserver library not found. Running in Bootstrap Mode.")
+    print("\n" + "="*60)
+    print("WARNING: adafruit_httpserver library failed to load.")
+    print(f"Error detail: {e}")
+    print("This usually means a dependency like 'adafruit_logging' is missing.")
+    print("Please inspect the traceback below for the missing file name:")
+    print("="*60)
+    import traceback
+    traceback.print_exception(e)
+    print("="*60 + "\n")
 
 # --- Configuration & Secrets Setup ---
 try:
@@ -54,7 +65,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.1"  # MATCHES the version inside ota_manifest.json to prevent bootloop!
+LOCAL_VERSION = "1.1.1"  # Incrementing version to force update download!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
@@ -113,6 +124,24 @@ def clean_string(text):
     cleaned = text.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
     return cleaned
 
+# Start listening for incoming local connections
+server = None
+
+def safe_delay(seconds):
+    """Delays execution for specified seconds without blocking.
+    Feeds the watchdog and polls the local web server rapidly (every 20ms)
+    to keep the connection highly responsive.
+    """
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < seconds:
+        w.feed()
+        if HAS_HTTPSERVER and server is not None:
+            try:
+                server.poll()
+            except Exception:
+                pass
+        time.sleep(0.02)  # Short sleep to prevent CPU exhaustion while allowing rapid polling
+
 def connect_wifi():
     """Connects/reconnects to the configured WiFi access point."""
     w.feed()
@@ -168,19 +197,29 @@ if connect_wifi():
         ip_str = str(wifi.radio.ipv4_address)
         octets = ip_str.split('.')
         if len(octets) == 4:
-            # Split "192.168.100.47" into "192.168." and "100.47" to fit characters_per_line nicely
+            # Split "192.168.100.24" into "192.168." and "100.24" to fit characters_per_line nicely
             ip_display = f"{octets[0]}.{octets[1]}.\n{octets[2]}.{octets[3]}"
         else:
             ip_display = ip_str
         
-        # Display IP on matrix in green for 5 seconds
+        # Display IP on matrix in green
         matrixportal.set_text_color("#00FF00")
         matrixportal.set_text(center_multiline_string(ip_display, characters_per_line))
-        for _ in range(5):
-            w.feed()
-            time.sleep(1)
+        safe_delay(5)
     except Exception as display_err:
         print(f"Error displaying IP: {display_err}")
+
+# Show web server import status on matrix
+try:
+    if HAS_HTTPSERVER:
+        matrixportal.set_text_color("#00FF00")  # Green
+        matrixportal.set_text(center_multiline_string("WEB OK\nPORT 80", characters_per_line))
+    else:
+        matrixportal.set_text_color("#FF0000")  # Red
+        matrixportal.set_text(center_multiline_string("WEB ERR\nBOOTSTRAP", characters_per_line))
+    safe_delay(2)
+except Exception:
+    pass
 
 # Set up reusable sockets and request sessions
 pool = socketpool.SocketPool(wifi.radio)
@@ -198,9 +237,7 @@ def perform_ota_check(requests_session, force=False):
     # 1. Visually display local version on the matrix screen
     matrixportal.set_text_color("#FFFF00")  # Yellow
     matrixportal.set_text(center_multiline_string(f"LOCAL\nv{LOCAL_VERSION}", characters_per_line))
-    for _ in range(2):
-         w.feed()
-         time.sleep(1)
+    safe_delay(2)
 
     # 2. Show the standard checking updates text
     matrixportal.set_text_color("#FFFF00")  # Yellow
@@ -222,9 +259,7 @@ def perform_ota_check(requests_session, force=False):
             # 3. Visually display remote version on the matrix screen
             matrixportal.set_text_color("#FFFF00")  # Yellow
             matrixportal.set_text(center_multiline_string(f"CLOUD\nv{remote_version}", characters_per_line))
-            for _ in range(2):
-                 w.feed()
-                 time.sleep(1)
+            safe_delay(2)
             
             if remote_version != LOCAL_VERSION or force:
                 print("Update triggered! Starting multi-file download bootstrap...")
@@ -282,9 +317,7 @@ def perform_ota_check(requests_session, force=False):
                 # 4. Visual confirmation that everything is matched and current
                 matrixportal.set_text_color("#00FF00")  # Green
                 matrixportal.set_text(center_multiline_string("UP TO\nDATE", characters_per_line))
-                for _ in range(2):
-                     w.feed()
-                     time.sleep(1)
+                safe_delay(2)
         else:
             print(f"Failed to fetch remote manifest: HTTP {response.status_code}")
     except Exception as ex:
@@ -303,7 +336,6 @@ def perform_ota_check(requests_session, force=False):
 perform_ota_check(requests)
 
 # --- Initialize Web Server only if library is present ---
-server = None
 if HAS_HTTPSERVER:
     try:
         server = HTTPServer(pool)
@@ -392,12 +424,7 @@ while True:
         print("WiFi disconnected. Reconnecting...")
         if not connect_wifi():
             print("Could not reconnect. Waiting 10 seconds...")
-            for _ in range(10):
-                w.feed()
-                if HAS_HTTPSERVER and server is not None:
-                    try: server.poll() 
-                    except Exception: pass
-                time.sleep(1)
+            safe_delay(10)
             continue
 
     # 2. Check if a web client pressed the force update button
@@ -436,10 +463,6 @@ while True:
                 for fav_name in favsign_list:
                     w.feed()
                     
-                    if HAS_HTTPSERVER and server is not None:
-                        try: server.poll()
-                        except Exception: pass
-                    
                     for sign_data in api_signs:
                         if fav_name == sign_data['name']:
                             print(f"\nMATCH FOUND: {fav_name}")
@@ -452,12 +475,8 @@ while True:
                             matrixportal.set_text_color("#0000FF")
                             matrixportal.set_text(centered_name)
                             
-                            for _ in range(3):
-                                w.feed()
-                                if HAS_HTTPSERVER and server is not None:
-                                    try: server.poll()
-                                    except Exception: pass
-                                time.sleep(1)
+                            # Hold name on screen (feeds WDT and processes web requests in the background)
+                            safe_delay(3)
 
                             raw_msg = sign_data['messages']
                             clean_msg = clean_string(raw_msg)
@@ -468,12 +487,8 @@ while True:
                             matrixportal.set_text_color(sign_text_color)
                             matrixportal.set_text(centered_msg)
                             
-                            for _ in range(10):
-                                w.feed()
-                                if HAS_HTTPSERVER and server is not None:
-                                    try: server.poll()
-                                    except Exception: pass
-                                time.sleep(1)
+                            # Hold message on screen for 10 seconds
+                            safe_delay(10)
 
             else:
                 print(f"Error: API returned unexpected structure: {type(json_data)}")
@@ -498,13 +513,9 @@ while True:
         force_ota_triggered = False
         perform_ota_check(requests, force=True)
 
-    # 5. Safe sleep interval polling web server
-    print("Cycle completed. Sleeping...")
-    for _ in range(30):
-        w.feed()
-        if HAS_HTTPSERVER and server is not None:
-            try:
-                server.poll()
-            except Exception:
-                pass
-        time.sleep(1)
+    # 5. Non-blocking sleep interval while polling web server rapidly
+    print("Cycle completed. Sleeping and listening for web connections...")
+    safe_delay(30)
+
+  }
+}
