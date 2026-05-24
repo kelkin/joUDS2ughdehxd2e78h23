@@ -10,10 +10,11 @@ Fixes & Enhancements:
 - Validates downloaded file size against HTTP Content-Length before swapping onto storage.
 - Fallback Submodule Import Engine to handle mismatched package exports natively.
 - Exponential backoff retry engine to handle DHCP and DNS settle delays smoothly.
+- Robust Socket Constant Fallback (AF_INET/SOCK_STREAM) for resilient Rescue Server binding.
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.12"  
+LOCAL_VERSION = "1.1.13"  
 
 import ssl
 import wifi
@@ -144,10 +145,29 @@ server = None
 rescue_socket = None
 
 def start_rescue_server():
+    """Initializes the raw socket Emergency Rescue Server on Port 80."""
     global rescue_socket, pool
     if rescue_socket is None:
         try:
-            rescue_socket = pool.socket(socketpool.AF_INET, socketpool.SOCK_STREAM)
+            # Universal auto-detection of network socket parameters
+            af_inet = 2      # Default standard AF_INET integer constant
+            sock_stream = 1  # Default standard SOCK_STREAM integer constant
+            
+            try:
+                if hasattr(pool, "AF_INET"):
+                    af_inet = pool.AF_INET
+                elif hasattr(socketpool, "AF_INET"):
+                    af_inet = socketpool.AF_INET
+            except Exception: pass
+            
+            try:
+                if hasattr(pool, "SOCK_STREAM"):
+                    sock_stream = pool.SOCK_STREAM
+                elif hasattr(socketpool, "SOCK_STREAM"):
+                    sock_stream = socketpool.SOCK_STREAM
+            except Exception: pass
+
+            rescue_socket = pool.socket(af_inet, sock_stream)
             rescue_socket.settimeout(0.02)
             try:
                 import socket
