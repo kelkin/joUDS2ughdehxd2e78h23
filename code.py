@@ -40,7 +40,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.0.6"  # Update this when pushing new code to GitHub!
+LOCAL_VERSION = "1.0.7"  # Update this when pushing new code to GitHub!
 VERSION_URL = secrets.get("github_version_url", "")
 CODE_URL = secrets.get("github_code_url", "")
 
