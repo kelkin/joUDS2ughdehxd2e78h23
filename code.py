@@ -27,7 +27,7 @@ Fixes & Enhancements:
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
 # Put this at the very top of the file so you can easily update it when pushing new code to GitHub!
-LOCAL_VERSION = "1.1.11"  
+LOCAL_VERSION = "1.1.12"  
 
 import ssl
 import wifi
@@ -155,41 +155,50 @@ print("Wireless stdout logging activated.")
 # --- Defensive Imports for Web Server Bootstrap ---
 web_error_message = ""
 try:
+    # Try high-level package level imports first (modern adafruit_httpserver versions)
     from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
     HAS_HTTPSERVER = True
-    print("Web server libraries loaded successfully.")
+    print("Web server libraries loaded successfully at package level.")
 except Exception as e:
-    HAS_HTTPSERVER = False
-    print("\n" + "="*60)
-    print("WARNING: adafruit_httpserver library failed to load.")
-    print(f"Error detail: {e}")
-    print("Please inspect the traceback below for details:")
-    print("="*60)
-    log_exception(e)
-    print("="*60 + "\n")
-    
-    # 1. Write traceback & file checklist to boot_error.txt for offline USB debugging
+    # Fallback directly to direct submodule imports if package level lacks exposures (older versions)
     try:
-        with open("boot_error.txt", "w") as f:
-            import io
-            sys.print_exception(e, f)
-            f.write("\n" + "="*50 + "\n")
-            f.write("Local Library Verification Checklist:\n")
-            f.write("="*50 + "\n")
-            for status in check_httpserver_files():
-                f.write(status + "\n")
-    except Exception as write_err:
-        print(f"Failed to write boot_error.txt: {write_err}")
-    
-    # 2. Extract clean error message to show on Matrix display
-    err_str = str(e)
-    if "no module named" in err_str.lower():
-        parts = err_str.split("'")
-        missing_module = parts[1] if len(parts) > 1 else "library"
-        missing_module = missing_module.replace("adafruit_", "")
-        web_error_message = missing_module.upper()
-    else:
-        web_error_message = "ERROR"
+        from adafruit_httpserver.server import HTTPServer
+        from adafruit_httpserver.response import HTTPResponse
+        from adafruit_httpserver.methods import HTTPMethod
+        HAS_HTTPSERVER = True
+        print("Web server submodules loaded successfully via module-level fallback.")
+    except Exception as fallback_err:
+        HAS_HTTPSERVER = False
+        print("\n" + "="*60)
+        print("WARNING: adafruit_httpserver library failed to load completely.")
+        print(f"Package-level error: {e}")
+        print(f"Fallback-level error: {fallback_err}")
+        print("="*60)
+        log_exception(fallback_err)
+        print("="*60 + "\n")
+        
+        # 1. Write traceback & file checklist to boot_error.txt for offline USB debugging
+        try:
+            with open("boot_error.txt", "w") as f:
+                import io
+                sys.print_exception(fallback_err, f)
+                f.write("\n" + "="*50 + "\n")
+                f.write("Local Library Verification Checklist:\n")
+                f.write("="*50 + "\n")
+                for status in check_httpserver_files():
+                    f.write(status + "\n")
+        except Exception as write_err:
+            print(f"Failed to write boot_error.txt: {write_err}")
+        
+        # 2. Extract clean error message to show on Matrix display
+        err_str = str(fallback_err)
+        if "no module named" in err_str.lower():
+            parts = err_str.split("'")
+            missing_module = parts[1] if len(parts) > 1 else "library"
+            missing_module = missing_module.replace("adafruit_", "")
+            web_error_message = missing_module.upper()
+        else:
+            web_error_message = "ERROR"
 
 # --- Configuration & Secrets Setup ---
 try:
@@ -271,7 +280,7 @@ def start_rescue_server():
     if rescue_socket is None:
         try:
             rescue_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
-            rescue_socket.settimeout(0.05)  # Short non-blocking timeout
+            rescue_socket.settimeout(0.02)  # Ultra short non-blocking timeout
             
             # Request socket port reuse (helps prevent "Address already in use" errors)
             try:
@@ -281,10 +290,17 @@ def start_rescue_server():
                 pass
                 
             rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
-            rescue_socket.listen(3)  # Increase backlog to handle parallel browser threads
+            
+            # Universal backlog fallback configuration
+            try:
+                rescue_socket.listen(3)
+            except TypeError:
+                rescue_socket.listen()  # Fallback for firmware versions rejecting integer limits
+                
             print("Emergency Rescue Web Server initialized on Port 80.")
         except Exception as e:
             print(f"Could not bind Emergency Rescue Server: {e}")
+            rescue_socket = None
 
 def poll_rescue_server():
     """Emergency Lightweight Web Server.
@@ -500,6 +516,9 @@ def perform_ota_check(requests_session, force=False):
         # Non-blocking optimization: Reduce timeout to 5 seconds so the browser never hangs!
         response = requests_session.get(MANIFEST_URL, timeout=5)
         if response.status_code == 200:
+            raw_text = response.text
+            print(f"Fetched Manifest Raw Contents (first 150 chars): {raw_text[:150]}")
+            
             manifest_data = response.json()
             w.feed()
             
