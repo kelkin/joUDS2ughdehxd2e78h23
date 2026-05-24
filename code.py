@@ -37,7 +37,7 @@ except ImportError:
 DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["url_suffix"])
 
 # Configuration settings
-LOCAL_VERSION = "1.0.2"
+LOCAL_VERSION = "1.0.3"
 debug = secrets.get("debug", 0)
 width = int(secrets.get("width", 64))
 height = int(secrets.get("height", 32))
@@ -254,3 +254,4 @@ while True:
     for _ in range(30):
         w.feed()
         time.sleep(1)
+
