@@ -18,7 +18,8 @@ Fixes & Enhancements:
 - Uses a non-blocking fast-polling safe_delay function to ensure port 80 is responsive.
 - Displays visual Wi-Fi status, splits/centers the IP address, and shows local/cloud
   versions along with Web Server status on the matrix screen during bootup.
-- Captures stdout/stderr into a sliding RAM buffer and serves a live console web page on `/logs`.
+- Captures stdout into a sliding RAM buffer and serves a live console web page on `/logs`.
+- ONLY redirects sys.stdout (and NOT sys.stderr) to prevent recursive boot crash loops.
 """
 
 import ssl
@@ -35,19 +36,32 @@ from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Stream Redirector for Wireless Logging ---
-# Captures all prints and errors into a rolling text buffer in memory
+# Captures all prints into a rolling text buffer in memory.
+# We ONLY redirect sys.stdout (and NOT sys.stderr) to prevent 
+# recursive crash loops during traceback print exceptions.
 class WebLogger:
     def __init__(self, max_lines=60):
         self.buffer = []
         self.max_lines = max_lines
         self.original_stdout = sys.stdout
-        self.original_stderr = sys.stderr
         self.current_line = ""
 
     def write(self, message):
-        # Keep writing to the physical serial port so USB debugging still works
-        self.original_stdout.write(message)
+        # Always pass through to the physical serial port first
+        try:
+            self.original_stdout.write(message)
+        except Exception:
+            pass
         
+        # Safe conversion of bytes/other types to clean string
+        if isinstance(message, (bytes, bytearray)):
+            try:
+                message = message.decode("utf-8")
+            except Exception:
+                message = str(message)
+        elif not isinstance(message, str):
+            message = str(message)
+            
         # Parse the output into clean lines for our web stream
         parts = message.split("\n")
         if len(parts) == 1:
@@ -64,7 +78,10 @@ class WebLogger:
                 self.buffer.pop(0)
 
     def flush(self):
-        self.original_stdout.flush()
+        try:
+            self.original_stdout.flush()
+        except Exception:
+            pass
 
     def get_logs(self):
         all_lines = list(self.buffer)
@@ -75,9 +92,8 @@ class WebLogger:
 # Activate wireless stream redirection immediately on boot
 web_logger = WebLogger()
 sys.stdout = web_logger
-sys.stderr = web_logger
 
-print("Wireless logging activated. Intercepting stdout & stderr.")
+print("Wireless stdout logging activated.")
 
 # --- Defensive Imports for Web Server Bootstrap ---
 try:
@@ -89,8 +105,8 @@ except Exception as e:
     print("\n" + "="*60)
     print("WARNING: adafruit_httpserver library failed to load.")
     print(f"Error detail: {e}")
-    print("This usually means a dependency like 'adafruit_logging' is missing.")
-    print("Please inspect the traceback below for the missing file name:")
+    print("This usually means a dependency like 'adafruit_logging' is missing or corrupt.")
+    print("Please inspect the traceback below for details:")
     print("="*60)
     import traceback
     traceback.print_exception(e)
@@ -108,7 +124,7 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub JSON Manifest) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.2"  # Synchronized to your latest working version!
+LOCAL_VERSION = "1.1.3"  # Synchronized to your latest working version!
 # We reuse your existing 'github_version_url' to point to your raw 'ota_manifest.json' file
 MANIFEST_URL = secrets.get("github_version_url", "")
 
@@ -375,8 +391,13 @@ def perform_ota_check(requests_session, force=False):
                 pass
         gc.collect()
 
-# Run the update check at bootup
-perform_ota_check(requests)
+# Run the update check at bootup.
+# SELF-HEALING BOOTSTRAP: If our web server libraries failed to import,
+# we automatically force a complete manifest repair download to self-heal!
+force_bootstrap = not HAS_HTTPSERVER
+if force_bootstrap:
+    print("Auto-triggering repair bootstrap to rebuild libraries...")
+perform_ota_check(requests, force=force_bootstrap)
 
 # --- Initialize Web Server only if library is present ---
 if HAS_HTTPSERVER:
