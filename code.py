@@ -20,7 +20,7 @@ Fixes & Enhancements:
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.35"  
+LOCAL_VERSION = "1.1.26"  
 
 import ssl
 import wifi
