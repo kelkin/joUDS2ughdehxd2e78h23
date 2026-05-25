@@ -16,10 +16,11 @@ Fixes & Enhancements:
 - Graceful TCP Preconnection handling to resolve Firefox empty response errors.
 - Warning-free exception tracebacks optimized for CircuitPython 9.x.
 - Shadow Library Cleanup Engine to delete obsolete single-file modules.
+- Replaced non-existent socket .recv() with standard CircuitPython .recv_into() to fix browser reset crashes.
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.17"  
+LOCAL_VERSION = "1.1.18"  
 
 import ssl
 import wifi
@@ -230,12 +231,13 @@ def poll_rescue_server():
             conn.settimeout(0.5)
             request_str = ""
             
-            # Settle Handshake: Read incoming headers over multiple passes for slow browser preconnections
+            # Settle Handshake: Read incoming headers over multiple passes using standard CircuitPython recv_into
+            buf = bytearray(512)
             for _ in range(3):
                 try:
-                    request = conn.recv(512)
-                    if request:
-                        request_str = request.decode("utf-8")
+                    num_bytes = conn.recv_into(buf)
+                    if num_bytes > 0:
+                        request_str = buf[:num_bytes].decode("utf-8")
                         break
                 except OSError:
                     pass
