@@ -20,7 +20,7 @@ Fixes & Enhancements:
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.26"  
+LOCAL_VERSION = "1.1.27"  
 
 import ssl
 import wifi
@@ -235,15 +235,15 @@ def start_rescue_server():
             
             # Robust Settle Binding Loop to bypass temporary EADDRINUSE port states
             bound = False
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
                     rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
                     bound = True
                     break
                 except OSError as bind_err:
                     if bind_err.errno == 112:  # EADDRINUSE
-                        print(f"Port 80 busy, retrying in 1s (attempt {attempt+1}/3)...")
-                        time.sleep(1.0)
+                        print(f"Port 80 busy, retrying in 1.5s (attempt {attempt+1}/5)...")
+                        time.sleep(1.5)
                     else:
                         raise bind_err
                         
@@ -255,6 +255,9 @@ def start_rescue_server():
             print("Emergency Rescue Web Server active on Port 80.")
         except Exception as e:
             print(f"Rescue binding failed: {e}")
+            try:
+                rescue_socket.close()
+            except Exception: pass
             rescue_socket = None
 
 def safe_send(conn, data):
