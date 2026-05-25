@@ -15,12 +15,13 @@ Fixes & Enhancements:
 - Aggressive memory reclamation (explicitly purging massive JSON dicts from RAM).
 - Graceful TCP Preconnection handling to resolve Firefox empty response errors.
 - Warning-free exception tracebacks optimized for CircuitPython 9.x.
-- Shadow Library Cleanup Engine to delete obsolete single-file modules.
+- Shadow Library Cleanup Engine to delete obsolete single-file modules (.py and .mpy).
 - Replaced non-existent socket .recv() with standard CircuitPython .recv_into() to fix browser reset crashes.
+- Nested Exception Diagnostic Logger to capture and print inner library import tracebacks on boot.
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.23"  
+LOCAL_VERSION = "1.1.24"  
 
 import ssl
 import wifi
@@ -36,12 +37,14 @@ from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Shadow Library Cleanup ---
-# Deletes leftover old single-file adafruit_httpserver.py which shadows folder imports!
-try:
-    os.remove("/lib/adafruit_httpserver.py")
-    print("Cleaned up shadowed single-file adafruit_httpserver.py.")
-except OSError:
-    pass
+# Deletes leftover old single-file adafruit_httpserver module files (.py or compiled .mpy)
+# which shadow the library directory!
+for shadow_file in ["/lib/adafruit_httpserver.py", "/lib/adafruit_httpserver.mpy"]:
+    try:
+        os.remove(shadow_file)
+        print(f"Cleaned up shadowed single-file: {shadow_file}")
+    except OSError:
+        pass
 
 # --- Stream Redirector for Wireless Logging ---
 class WebLogger:
@@ -102,12 +105,17 @@ def log_exception(e):
         except Exception as ex:
             print(f"Exception logging failed: {e}")
 
-# --- Defensive Imports for Web Server Bootstrap ---
+# --- Defensive Imports with Nested Traceback Reporting ---
 web_error_message = ""
 try:
     from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
     HAS_HTTPSERVER = True
 except Exception as e:
+    # Print the exact inner traceback to serial so we see why the import is failing
+    print("\n" + "!"*60)
+    print("CORE IMPORT ERROR: Package level import failed. Nested details below:")
+    sys.print_exception(e)
+    print("!"*60 + "\n")
     try:
         from adafruit_httpserver.server import HTTPServer
         from adafruit_httpserver.response import HTTPResponse
@@ -115,6 +123,10 @@ except Exception as e:
         HAS_HTTPSERVER = True
     except Exception as fallback_err:
         HAS_HTTPSERVER = False
+        print("\n" + "!"*60)
+        print("FALLBACK IMPORT ERROR: Submodule import failed. Nested details below:")
+        sys.print_exception(fallback_err)
+        print("!"*60 + "\n")
         log_exception(fallback_err)
         try:
             ex_repr = repr(fallback_err)
@@ -514,17 +526,3 @@ while True:
         gc.collect()      # Force flush!
 
     safe_delay(30)
-```
-eof
-
----
-
-### Three Simple Steps to Force Wireless Self-Healing:
-
-To break the version-lock loop and force your board's atomic safe-update engine to automatically download a 100% clean copy of the libraries, follow these steps:
-
-#### Step 1: Update Your GitHub Files
-1. Copy the clean code from the **Canvas** on the right and save it to `code.py` in your GitHub repository.
-2. In your GitHub copy, change **line 24** of `code.py` to:
-   ```python
-   LOCAL_VERSION = "1.1.23"
