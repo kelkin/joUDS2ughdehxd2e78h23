@@ -8,7 +8,7 @@ Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
 Fixes & Enhancements:
 - Implements ATOMIC FILE WRITING to completely eliminate 0-byte file truncation crashes.
 - Validates downloaded file size against HTTP Content-Length before swapping onto storage.
-- Fallback Submodule Import Engine to handle mismatched package exports natively.
+- Absolute Module Routing Engine to bypass package-level initialization mismatch faults.
 - Exponential backoff retry engine to handle DHCP and DNS settle delays smoothly.
 - Robust Socket Constant Fallback (AF_INET/SOCK_STREAM) for resilient Rescue Server binding.
 - Chunked Socket Streaming Engine in Rescue Server to prevent out-of-memory (OOM) fragmentation.
@@ -17,11 +17,10 @@ Fixes & Enhancements:
 - Warning-free exception tracebacks optimized for CircuitPython 9.x.
 - Shadow Library Cleanup Engine to delete obsolete single-file modules (.py and .mpy).
 - Replaced non-existent socket .recv() with standard CircuitPython .recv_into() to fix browser reset crashes.
-- Nested Exception Diagnostic Logger to capture and print inner library import tracebacks on boot.
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.25"  
+LOCAL_VERSION = "1.1.26"  
 
 import ssl
 import wifi
@@ -37,12 +36,9 @@ from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Shadow Library Cleanup ---
-# Deletes leftover old single-file adafruit_httpserver module files (.py or compiled .mpy)
-# which shadow the library directory!
 for shadow_file in ["/lib/adafruit_httpserver.py", "/lib/adafruit_httpserver.mpy"]:
     try:
         os.remove(shadow_file)
-        print(f"Cleaned up shadowed single-file: {shadow_file}")
     except OSError:
         pass
 
@@ -105,51 +101,23 @@ def log_exception(e):
         except Exception as ex:
             print(f"Exception logging failed: {e}")
 
-# --- Deep Nested Step-by-Step Diagnostic Import Checker ---
-print("--- STARTING DEEP IMPORT DIAGNOSTICS ---")
-try:
-    import adafruit_logging
-    print("✅ adafruit_logging: OK")
-except Exception as log_err:
-    print("❌ adafruit_logging: FAILED")
-    sys.print_exception(log_err)
-
-try:
-    import adafruit_ticks
-    print("✅ adafruit_ticks: OK")
-except Exception as ticks_err:
-    print("❌ adafruit_ticks: FAILED")
-    sys.print_exception(ticks_err)
-
-try:
-    import adafruit_httpserver.server
-    print("✅ adafruit_httpserver.server file: OK")
-except Exception as srv_err:
-    print("❌ adafruit_httpserver.server file: FAILED TO IMPORT")
-    sys.print_exception(srv_err)
-
-# --- Defensive Imports with Nested Traceback Reporting ---
+# --- Defensive Absolute Imports with Submodule Fallbacks ---
+HAS_HTTPSERVER = False
 web_error_message = ""
+
 try:
-    from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
+    # Try absolute submodule routing first to skip packages initialization bottlenecks
+    from adafruit_httpserver.server import HTTPServer
+    from adafruit_httpserver.response import HTTPResponse
+    from adafruit_httpserver.methods import HTTPMethod
     HAS_HTTPSERVER = True
-except Exception as e:
-    # Print the exact inner traceback to serial so we see why the import is failing
-    print("\n" + "!"*60)
-    print("CORE IMPORT ERROR: Package level import failed. Nested details below:")
-    sys.print_exception(e)
-    print("!"*60 + "\n")
+except Exception as direct_err:
     try:
-        from adafruit_httpserver.server import HTTPServer
-        from adafruit_httpserver.response import HTTPResponse
-        from adafruit_httpserver.methods import HTTPMethod
+        # Fallback to standard package layout exposure
+        from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
         HAS_HTTPSERVER = True
     except Exception as fallback_err:
         HAS_HTTPSERVER = False
-        print("\n" + "!"*60)
-        print("FALLBACK IMPORT ERROR: Submodule import failed. Nested details below:")
-        sys.print_exception(fallback_err)
-        print("!"*60 + "\n")
         log_exception(fallback_err)
         try:
             ex_repr = repr(fallback_err)
@@ -205,22 +173,15 @@ def start_rescue_server():
     global rescue_socket, pool
     if rescue_socket is None:
         try:
-            # Universal auto-detection of network socket parameters
-            af_inet = 2      # Default standard AF_INET integer constant
-            sock_stream = 1  # Default standard SOCK_STREAM integer constant
-            
+            af_inet = 2      
+            sock_stream = 1  
             try:
-                if hasattr(pool, "AF_INET"):
-                    af_inet = pool.AF_INET
-                elif hasattr(socketpool, "AF_INET"):
-                    af_inet = socketpool.AF_INET
+                if hasattr(pool, "AF_INET"): af_inet = pool.AF_INET
+                elif hasattr(socketpool, "AF_INET"): af_inet = socketpool.AF_INET
             except Exception: pass
-            
             try:
-                if hasattr(pool, "SOCK_STREAM"):
-                    sock_stream = pool.SOCK_STREAM
-                elif hasattr(socketpool, "SOCK_STREAM"):
-                    sock_stream = socketpool.SOCK_STREAM
+                if hasattr(pool, "SOCK_STREAM"): sock_stream = pool.SOCK_STREAM
+                elif hasattr(socketpool, "SOCK_STREAM"): sock_stream = socketpool.SOCK_STREAM
             except Exception: pass
 
             rescue_socket = pool.socket(af_inet, sock_stream)
@@ -245,19 +206,16 @@ def safe_send(conn, data):
     while bytes_sent < len(data):
         try:
             sent = conn.send(data[bytes_sent:])
-            if sent == 0:
-                break
+            if sent == 0: break
             bytes_sent += sent
         except OSError as e:
-            if e.errno == 11:  # EAGAIN, let socket catch its breath
+            if e.errno == 11:  
                 time.sleep(0.01)
                 continue
             raise e
 
 def poll_rescue_server():
-    """Emergency Lightweight Web Server.
-    Streams pages to clients dynamically to prevent RAM spike crashes.
-    """
+    """Emergency Lightweight Web Server. Streams logs dynamically to protect memory footprint."""
     global rescue_socket
     if not HAS_HTTPSERVER and rescue_socket is not None:
         conn = None
@@ -265,8 +223,6 @@ def poll_rescue_server():
             conn, addr = rescue_socket.accept()
             conn.settimeout(0.5)
             request_str = ""
-            
-            # Settle Handshake: Read incoming headers over multiple passes using standard CircuitPython recv_into
             buf = bytearray(512)
             for _ in range(3):
                 try:
@@ -274,11 +230,9 @@ def poll_rescue_server():
                     if num_bytes > 0:
                         request_str = buf[:num_bytes].decode("utf-8")
                         break
-                except OSError:
-                    pass
+                except OSError: pass
                 time.sleep(0.05)
             
-            # Fast-path drop of favicons to preserve connection sockets
             if request_str and "favicon.ico" in request_str:
                 try:
                     conn.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("utf-8"))
@@ -287,38 +241,27 @@ def poll_rescue_server():
                 return
             
             print(f"Rescue connection accepted from {addr}")
-            
-            # 1. Send HTTP Response Headers immediately with UTF-8 charset!
             safe_send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
-            
-            # 2. Stream Page Header in small chunks
             safe_send(conn, "<!DOCTYPE html><html><head><title>Rescue Console</title>")
             safe_send(conn, "<meta name='viewport' content='width=device-width, initial-scale=1'>")
             safe_send(conn, "<style>body{font-family:monospace;background-color:#111;color:#ff3333;margin:20px;line-height:1.4;}")
             safe_send(conn, "pre{background-color:#000;padding:15px;border-radius:5px;border:1px solid #333;overflow-x:auto;white-space:pre-wrap;color:#00ff00;}</style></head>")
             safe_send(conn, "<body><h1>🚨 Matrix Portal S3 - Rescue System</h1>")
             safe_send(conn, "<h2>System Diagnostic & Download Logs:</h2><pre>")
-            
-            # 3. Stream web_logger line-by-line directly to socket (0-string allocation!)
             for line in web_logger.buffer:
                 safe_send(conn, line + "\n")
             if web_logger.current_line:
                 safe_send(conn, web_logger.current_line)
-                
-            # 4. Stream Page Footer
             safe_send(conn, "</pre></body></html>")
-            
-            # Give TCP stacks a brief moment to fully flush buffers before terminating socket
             time.sleep(0.15)
             conn.close()
         except OSError: pass
         except Exception as ex:
-            print(f"Rescue routing error: {ex}")
             if conn:
                 try: conn.close()
                 except Exception: pass
         finally:
-            gc.collect()  # Flush socket cache immediately!
+            gc.collect()
 
 def safe_delay(seconds):
     start_time = time.monotonic()
@@ -338,7 +281,6 @@ def connect_wifi():
         matrixportal.set_text_color("#00FFFF")
         matrixportal.set_text(center_multiline_string("CONNECTING\nWIFI...", characters_per_line))
     except Exception: pass
-
     try:
         wifi.radio.connect(secrets["ssid"], secrets["password"])
         w.feed()
@@ -386,12 +328,7 @@ except Exception: pass
 # --- Atomic Manifest-Based Safe OTA Updater ---
 def perform_ota_check(requests_session, force=False):
     if not ENABLE_OTA or not MANIFEST_URL: return
-
     print(f"Checking updates via Manifest... Local Version: {LOCAL_VERSION}")
-    matrixportal.set_text_color("#FFFF00")
-    matrixportal.set_text(center_multiline_string(f"LOCAL\nv{LOCAL_VERSION}", characters_per_line))
-    safe_delay(2)
-    matrixportal.set_text(center_multiline_string("CHECKING\nUPDATE", characters_per_line))
     
     response = None
     for retry in range(3):
@@ -409,45 +346,31 @@ def perform_ota_check(requests_session, force=False):
             remote_version = manifest_data.get("version", "0.0.0")
             files_to_download = manifest_data.get("files", {})
             
-            matrixportal.set_text_color("#FFFF00")
-            matrixportal.set_text(center_multiline_string(f"CLOUD\nv{remote_version}", characters_per_line))
-            safe_delay(2)
-            
             if remote_version != LOCAL_VERSION or force:
                 print("Update found! Fetching files onto safe temporary storage...")
                 matrixportal.set_text_color("#00FF00")
                 matrixportal.set_text(center_multiline_string("DOWNLOADING\nFILES...", characters_per_line))
                 response.close()
-                
                 successful_swaps = []
                 
                 for local_path, remote_url in files_to_download.items():
                     w.feed()
                     print(f"Fetching {local_path}...")
-                    
                     file_response = None
                     try:
                         file_response = requests_session.get(remote_url, timeout=10)
                         if file_response.status_code == 200:
                             file_content = file_response.text
-                            
-                            # Size verification validation
                             content_length = file_response.headers.get("content-length")
                             if content_length is not None:
-                                expected_size = int(content_length)
-                                actual_size = len(file_content.encode("utf-8"))
-                                if actual_size != expected_size:
-                                    raise RuntimeError(f"Truncated! Size mismatch for {local_path}")
+                                if len(file_content.encode("utf-8")) != int(content_length):
+                                    raise RuntimeError(f"Size mismatch for {local_path}")
                             
                             ensure_dir_exists(local_path)
                             temp_path = local_path + ".tmp"
-                            
-                            # Stage file onto safe temporary file block
                             with open(temp_path, "w") as f:
                                 f.write(file_content)
-                                
                             successful_swaps.append((temp_path, local_path))
-                            print(f"Staged cleanly: {local_path}")
                         else:
                             raise RuntimeError(f"HTTP Error {file_response.status_code}")
                     except Exception as err:
@@ -457,7 +380,6 @@ def perform_ota_check(requests_session, force=False):
                         if file_response: file_response.close()
                         gc.collect()
                 
-                # --- All files written cleanly! Apply Atomic Swap ---
                 print("All files validated. Applying safe storage overwrite swap...")
                 for temp_path, final_path in successful_swaps:
                     try: os.remove(final_path)
@@ -471,9 +393,7 @@ def perform_ota_check(requests_session, force=False):
                 import microcontroller
                 microcontroller.reset()
             else:
-                matrixportal.set_text_color("#00FF00")
-                matrixportal.set_text(center_multiline_string("UP TO DATE", characters_per_line))
-                safe_delay(2)
+                print("Up to date.")
     except Exception as ex:
         print(f"OTA Error: {ex}")
     finally:
@@ -515,12 +435,9 @@ while True:
     try:
         response = requests.get(DATA_SOURCE_URL, timeout=8)
         if response.status_code == 200:
-            print("API fetch successful. Processing JSON payload...")
             json_data = response.json()
             w.feed()
-            
             if isinstance(json_data, list):
-                print(f"Successfully parsed {len(json_data)} signs. Filtering matched signs...")
                 for fav_name in favsign_list:
                     w.feed()
                     for sign in json_data:
@@ -538,29 +455,7 @@ while True:
         print(f"API Loop error: {e}")
     finally:
         if response: response.close()
-        json_data = None  # Reclaim massive JSON payload instantly from RAM!
-        gc.collect()      # Force flush!
+        json_data = None  
+        gc.collect()      
 
     safe_delay(30)
-```
-eof
-
-### Action Plan to Force Wireless Self-Healing:
-
-To bypass the version-lock loop and force the board's update mechanism to download the missing backend subdirectories automatically, perform these steps:
-
-#### Step 1: Add the missing `backends` folder to your GitHub `version.txt`
-In modern releases of `adafruit_httpserver`, a nested `backends` folder is required. Open your GitHub manifest file (`version.txt` or `ota_manifest.json`) and **append these two lines** inside the `"files"` dictionary:
-```json
-    "lib/adafruit_httpserver/backends/__init__.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/backends/__init__.py",
-    "lib/adafruit_httpserver/backends/socketpool.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/backends/socketpool.py"
-```
-
-#### Step 2: Push code `1.1.25` to GitHub and Bump version to `1.1.25`
-1. Overwrite your GitHub copy of `code.py` with this updated script from the **Canvas** (making sure `LOCAL_VERSION` on line 24 matches `"1.1.25"`).
-2. Open your GitHub `version.txt` manifest and set the `"version"` parameter inside to `"1.1.25"`.
-
-#### Step 3: Flash your local board with `1.1.24`
-1. Overwrite your physical board's `code.py` with the code in the **Canvas** above, but change **line 24** of your physical board's `code.py` to:
-   ```python
-   LOCAL_VERSION = "1.1.24"
