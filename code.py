@@ -20,7 +20,7 @@ Fixes & Enhancements:
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.22"  
+LOCAL_VERSION = "1.1.23"  
 
 import ssl
 import wifi
@@ -514,3 +514,17 @@ while True:
         gc.collect()      # Force flush!
 
     safe_delay(30)
+```
+eof
+
+---
+
+### Three Simple Steps to Force Wireless Self-Healing:
+
+To break the version-lock loop and force your board's atomic safe-update engine to automatically download a 100% clean copy of the libraries, follow these steps:
+
+#### Step 1: Update Your GitHub Files
+1. Copy the clean code from the **Canvas** on the right and save it to `code.py` in your GitHub repository.
+2. In your GitHub copy, change **line 24** of `code.py` to:
+   ```python
+   LOCAL_VERSION = "1.1.23"
