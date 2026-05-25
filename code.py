@@ -8,9 +8,9 @@ Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
 Fixes & Enhancements:
 - Implements ATOMIC FILE WRITING to completely eliminate 0-byte file truncation crashes.
 - Validates downloaded file size against HTTP Content-Length before swapping onto storage.
-- Absolute Module Routing Engine to bypass package-level initialization mismatch faults.
+- Dynamic Class Name Auto-Mapper to handle modern 'Server'/'Response' and older 'HTTPServer' layouts.
+- Retry settle binding loop to prevent EADDRINUSE socket collisions during soft reboots.
 - Exponential backoff retry engine to handle DHCP and DNS settle delays smoothly.
-- Robust Socket Constant Fallback (AF_INET/SOCK_STREAM) for resilient Rescue Server binding.
 - Chunked Socket Streaming Engine in Rescue Server to prevent out-of-memory (OOM) fragmentation.
 - Aggressive memory reclamation (explicitly purging massive JSON dicts from RAM).
 - Graceful TCP Preconnection handling to resolve Firefox empty response errors.
@@ -105,25 +105,67 @@ def log_exception(e):
 HAS_HTTPSERVER = False
 web_error_message = ""
 
+HTTPServer = None
+HTTPResponse = None
+HTTPMethod = None
+
+# Step 1: Inspect submodules to dynamically map and bind namespaces
 try:
-    # Try absolute submodule routing first to skip packages initialization bottlenecks
-    from adafruit_httpserver.server import HTTPServer
-    from adafruit_httpserver.response import HTTPResponse
-    from adafruit_httpserver.methods import HTTPMethod
-    HAS_HTTPSERVER = True
-except Exception as direct_err:
+    import adafruit_httpserver.server as _srv
+    if hasattr(_srv, "Server"):
+        HTTPServer = _srv.Server
+    elif hasattr(_srv, "HTTPServer"):
+        HTTPServer = _srv.HTTPServer
+except Exception:
+    pass
+
+try:
+    import adafruit_httpserver.response as _resp
+    if hasattr(_resp, "HTTPResponse"):
+        HTTPResponse = _resp.HTTPResponse
+    elif hasattr(_resp, "Response"):
+        HTTPResponse = _resp.Response
+except Exception:
+    pass
+
+try:
+    import adafruit_httpserver.methods as _meth
+    if hasattr(_meth, "HTTPMethod"):
+        HTTPMethod = _meth.HTTPMethod
+    elif hasattr(_meth, "Method"):
+        HTTPMethod = _meth.Method
+except Exception:
     try:
-        # Fallback to standard package layout exposure
-        from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
-        HAS_HTTPSERVER = True
+        import adafruit_httpserver.method as _meth
+        if hasattr(_meth, "HTTPMethod"):
+            HTTPMethod = _meth.HTTPMethod
+        elif hasattr(_meth, "Method"):
+            HTTPMethod = _meth.Method
+    except Exception:
+        pass
+
+# Step 2: Package level fallback search if absolute submodules failed
+if HTTPServer is None or HTTPResponse is None or HTTPMethod is None:
+    try:
+        import adafruit_httpserver as _pkg
+        if HTTPServer is None:
+            if hasattr(_pkg, "Server"): HTTPServer = _pkg.Server
+            elif hasattr(_pkg, "HTTPServer"): HTTPServer = _pkg.HTTPServer
+        if HTTPResponse is None:
+            if hasattr(_pkg, "Response"): HTTPResponse = _pkg.Response
+            elif hasattr(_pkg, "HTTPResponse"): HTTPResponse = _pkg.HTTPResponse
+        if HTTPMethod is None:
+            if hasattr(_pkg, "HTTPMethod"): HTTPMethod = _pkg.HTTPMethod
+            elif hasattr(_pkg, "Method"): HTTPMethod = _pkg.Method
     except Exception as fallback_err:
-        HAS_HTTPSERVER = False
-        log_exception(fallback_err)
-        try:
-            ex_repr = repr(fallback_err)
-            web_error_message = ex_repr.split("(")[0].split(".")[-1].replace("Error", "").upper()[:10]
-        except Exception:
-            web_error_message = "ERROR"
+        pass
+
+# Step 3: Determine overall import success status
+if HTTPServer is not None and HTTPResponse is not None and HTTPMethod is not None:
+    HAS_HTTPSERVER = True
+else:
+    HAS_HTTPSERVER = False
+    web_error_message = "IMPORT"
 
 try:
     from secrets import secrets
@@ -190,7 +232,24 @@ def start_rescue_server():
                 import socket
                 rescue_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             except Exception: pass
-            rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
+            
+            # Robust Settle Binding Loop to bypass temporary EADDRINUSE port states
+            bound = False
+            for attempt in range(3):
+                try:
+                    rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
+                    bound = True
+                    break
+                except OSError as bind_err:
+                    if bind_err.errno == 112:  # EADDRINUSE
+                        print(f"Port 80 busy, retrying in 1s (attempt {attempt+1}/3)...")
+                        time.sleep(1.0)
+                    else:
+                        raise bind_err
+                        
+            if not bound:
+                raise RuntimeError("Could not bind to Port 80 after multiple retry cycles.")
+
             try: rescue_socket.listen(3)
             except TypeError: rescue_socket.listen()
             print("Emergency Rescue Web Server active on Port 80.")
