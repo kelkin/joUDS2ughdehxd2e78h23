@@ -21,7 +21,7 @@ Fixes & Enhancements:
 """
 
 # --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.24"  
+LOCAL_VERSION = "1.1.25"  
 
 import ssl
 import wifi
@@ -104,6 +104,29 @@ def log_exception(e):
             print(stream.getvalue())
         except Exception as ex:
             print(f"Exception logging failed: {e}")
+
+# --- Deep Nested Step-by-Step Diagnostic Import Checker ---
+print("--- STARTING DEEP IMPORT DIAGNOSTICS ---")
+try:
+    import adafruit_logging
+    print("✅ adafruit_logging: OK")
+except Exception as log_err:
+    print("❌ adafruit_logging: FAILED")
+    sys.print_exception(log_err)
+
+try:
+    import adafruit_ticks
+    print("✅ adafruit_ticks: OK")
+except Exception as ticks_err:
+    print("❌ adafruit_ticks: FAILED")
+    sys.print_exception(ticks_err)
+
+try:
+    import adafruit_httpserver.server
+    print("✅ adafruit_httpserver.server file: OK")
+except Exception as srv_err:
+    print("❌ adafruit_httpserver.server file: FAILED TO IMPORT")
+    sys.print_exception(srv_err)
 
 # --- Defensive Imports with Nested Traceback Reporting ---
 web_error_message = ""
@@ -255,15 +278,8 @@ def poll_rescue_server():
                     pass
                 time.sleep(0.05)
             
-            # Gracefully ignore empty browser preconnection checks to prevent 200 OK empty faults
-            if not request_str:
-                try:
-                    conn.close()
-                except Exception: pass
-                return
-            
             # Fast-path drop of favicons to preserve connection sockets
-            if "favicon.ico" in request_str or (request_str and "GET / " not in request_str and "GET /logs" not in request_str):
+            if request_str and "favicon.ico" in request_str:
                 try:
                     conn.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("utf-8"))
                     conn.close()
@@ -526,3 +542,25 @@ while True:
         gc.collect()      # Force flush!
 
     safe_delay(30)
+```
+eof
+
+### Action Plan to Force Wireless Self-Healing:
+
+To bypass the version-lock loop and force the board's update mechanism to download the missing backend subdirectories automatically, perform these steps:
+
+#### Step 1: Add the missing `backends` folder to your GitHub `version.txt`
+In modern releases of `adafruit_httpserver`, a nested `backends` folder is required. Open your GitHub manifest file (`version.txt` or `ota_manifest.json`) and **append these two lines** inside the `"files"` dictionary:
+```json
+    "lib/adafruit_httpserver/backends/__init__.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/backends/__init__.py",
+    "lib/adafruit_httpserver/backends/socketpool.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/backends/socketpool.py"
+```
+
+#### Step 2: Push code `1.1.25` to GitHub and Bump version to `1.1.25`
+1. Overwrite your GitHub copy of `code.py` with this updated script from the **Canvas** (making sure `LOCAL_VERSION` on line 24 matches `"1.1.25"`).
+2. Open your GitHub `version.txt` manifest and set the `"version"` parameter inside to `"1.1.25"`.
+
+#### Step 3: Flash your local board with `1.1.24`
+1. Overwrite your physical board's `code.py` with the code in the **Canvas** above, but change **line 24** of your physical board's `code.py` to:
+   ```python
+   LOCAL_VERSION = "1.1.24"
