@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "1.1.3"
+LOCAL_VERSION = "1.1.4"
 
 # --- Imports ---
 import ssl
@@ -258,7 +258,13 @@ def safe_send(conn, data):
             raise
 
 def poll_rescue_server():
-    """Non-blocking poll: accepts one connection, streams the log page, closes."""
+    """Non-blocking poll: accepts one connection, sends the full log page, closes.
+
+    Firefox requires a Content-Length header — it will show a blank page or
+    connection reset if the response arrives in unpredictable chunks without one.
+    Fix: build the complete HTML body as a single string, measure its byte length,
+    send the header with that length, then send the body. One complete transaction.
+    """
     global rescue_socket
     if rescue_socket is None:
         return
@@ -278,7 +284,7 @@ def poll_rescue_server():
                 pass
             time.sleep(0.05)
 
-        # Silently discard favicon requests — browsers always ask
+        # Silently discard favicon requests — browsers always send one
         if request_str and "favicon.ico" in request_str:
             try:
                 conn.send(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -288,28 +294,53 @@ def poll_rescue_server():
             return
 
         print(f"Rescue connection from {addr}")
-        safe_send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
-        safe_send(conn, "<!DOCTYPE html><html><head><title>Matrix Portal S3 - Rescue Console</title>")
-        safe_send(conn, "<meta name='viewport' content='width=device-width, initial-scale=1'>")
-        safe_send(conn, "<style>")
-        safe_send(conn, "body{font-family:monospace;background:#111;color:#ff3333;margin:20px;line-height:1.4;}")
-        safe_send(conn, "h1{color:#ff3333;}h2{color:#ffaa00;}")
-        safe_send(conn, "pre{background:#000;padding:15px;border-radius:5px;border:1px solid #333;"
-                        "overflow-x:auto;white-space:pre-wrap;color:#00ff00;}")
-        safe_send(conn, ".meta{color:#888;font-size:0.85em;margin-bottom:10px;}")
-        safe_send(conn, "</style></head>")
-        safe_send(conn, "<body>")
-        safe_send(conn, "<h1>&#x1F6A8; Matrix Portal S3 &mdash; Rescue Console</h1>")
-        meta = "<div class=\"meta\">Firmware: v" + LOCAL_VERSION + " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) + " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
-        safe_send(conn, meta)
-        safe_send(conn, "<h2>Log Output:</h2><pre>")
-        for line in web_logger.buffer:
-            safe_send(conn, line + "\n")
+
+        # Escape log content so < > & render correctly in the browser
+        log_lines = list(web_logger.buffer)
         if web_logger.current_line:
-            safe_send(conn, web_logger.current_line)
-        safe_send(conn, "</pre></body></html>")
+            log_lines.append(web_logger.current_line)
+        log_content = "\n".join(log_lines)
+        log_escaped = (log_content
+                       .replace("&", "&amp;")
+                       .replace("<", "&lt;")
+                       .replace(">", "&gt;"))
+
+        # Build the complete HTML body as one string so we can measure it
+        body = (
+            "<!DOCTYPE html><html><head>"
+            "<title>Matrix Portal S3 - Rescue Console</title>"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<style>"
+            "body{font-family:monospace;background:#111;color:#ff3333;margin:20px;line-height:1.4;}"
+            "h1{color:#ff3333;}h2{color:#ffaa00;}"
+            "pre{background:#000;padding:15px;border-radius:5px;border:1px solid #333;"
+            "overflow-x:auto;white-space:pre-wrap;color:#00ff00;}"
+            ".meta{color:#888;font-size:0.85em;margin-bottom:10px;}"
+            "</style></head><body>"
+            "<h1>&#x1F6A8; Matrix Portal S3 &mdash; Rescue Console</h1>"
+            "<div class=\"meta\">Firmware: v" + LOCAL_VERSION +
+            " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
+            " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
+            "<h2>Log Output:</h2>"
+            "<pre>" + log_escaped + "</pre>"
+            "</body></html>"
+        )
+
+        # Encode once to get the true byte length for Content-Length
+        body_bytes = body.encode("utf-8")
+        header = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "Content-Length: " + str(len(body_bytes)) + "\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+
+        safe_send(conn, header)
+        safe_send(conn, body_bytes)
         time.sleep(0.15)
         conn.close()
+
     except OSError:
         pass
     except Exception as ex:
