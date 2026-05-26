@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "1.1.6"
+LOCAL_VERSION = "1.1.8"
 
 # --- Imports ---
 import ssl
@@ -369,19 +369,28 @@ def poll_rescue_server():
     finally:
         gc.collect()
 
+def poll_server():
+    """Poll the active web server once. Handles both adafruit_httpserver
+    and the raw socket rescue server transparently."""
+    if HAS_HTTPSERVER and server is not None:
+        try:
+            server.poll()
+        except Exception as _poll_err:
+            # Log poll errors so they appear in the rescue console if needed
+            # but don't crash the main loop
+            err_str = str(_poll_err)
+            if err_str and "timed out" not in err_str and "ETIMEDOUT" not in err_str:
+                print(f"server.poll() error: {err_str}")
+    else:
+        poll_rescue_server()
+
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
     polling the web server so the log page stays responsive."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
         w.feed()
-        if HAS_HTTPSERVER and server is not None:
-            try:
-                server.poll()
-            except Exception:
-                pass
-        else:
-            poll_rescue_server()
+        poll_server()
         time.sleep(0.02)
 
 # --- WiFi Connection ---
@@ -626,6 +635,10 @@ perform_ota_check(requests, force=False)
 if HAS_HTTPSERVER and pool is not None:
     try:
         server = Server(pool)
+        # Set a very short socket timeout so poll() returns immediately
+        # when no browser is connected, keeping the main loop non-blocking.
+        # Without this, poll() blocks for the default timeout on every call.
+        server.socket_timeout = 0.05
 
         @server.route("/", GET)
         def route_index(request):
@@ -692,62 +705,71 @@ while True:
     print("Fetching NY511 API data...")
     response = None
     json_data = None
+    matched_signs = []  # Only store the signs we actually need to display
     try:
-        # Poll before the API fetch — browsers often connect right at cycle start
-        if HAS_HTTPSERVER and server is not None:
-            try: server.poll()
-            except Exception: pass
-        else:
-            poll_rescue_server()
+        poll_server()  # Service web requests before API fetch
 
         response = requests.get(DATA_SOURCE_URL, timeout=15)
         w.feed()
 
-        # Poll after fetch — JSON parsing of 900+ signs blocks for several seconds
-        if HAS_HTTPSERVER and server is not None:
-            try: server.poll()
-            except Exception: pass
-        else:
-            poll_rescue_server()
+        poll_server()  # Service web requests after API fetch
 
         if response.status_code == 200:
             print("API fetch successful. Parsing JSON...")
             json_data = response.json()
             w.feed()
 
-            # Poll after JSON parsing before starting the display loop
-            if HAS_HTTPSERVER and server is not None:
-                try: server.poll()
-                except Exception: pass
-            else:
-                poll_rescue_server()
+            # Close response immediately after parsing to free socket buffer RAM
+            try:
+                response.close()
+            except Exception:
+                pass
+            response = None
+
+            poll_server()  # Service web requests after JSON parse
 
             if isinstance(json_data, list):
-                print(f"Loaded {len(json_data)} signs from API.")
-                print("Matching against favourites...")
+                sign_count = len(json_data)
+                print(f"Loaded {sign_count} signs from API.")
+                print("Extracting favourites...")
 
-                for fav_name in favsign_list:
+                # Extract only matching signs into a small list, then free the full dataset
+                fav_set = set(favsign_list)
+                for sign in json_data:
+                    if "Name" in sign and "Messages" in sign and sign["Name"] in fav_set:
+                        matched_signs.append({
+                            "name": sign["Name"],
+                            "msg": sign["Messages"]
+                        })
+
+                # Free the full 928-sign JSON list NOW before display loops
+                json_data = None
+                gc.collect()
+                gc.collect()  # Double-collect — CircuitPython sometimes needs two passes
+                print(f"Matched {len(matched_signs)} sign(s). Free RAM after GC: {gc.mem_free()}")
+
+                poll_server()  # Service web requests before display loop
+
+                for match in matched_signs:
                     w.feed()
-                    for sign in json_data:
-                        if "Name" in sign and fav_name == sign["Name"]:
-                            print(f"\nMATCH: {fav_name}")
+                    print(f"\nMATCH: {match['name']}")
 
-                            # Display sign name in blue
-                            centered_name = center_multiline_string(
-                                clean_string(sign["Name"]), characters_per_line)
-                            print(f"Name display:\n{centered_name}")
-                            matrixportal.set_text_color(0x0000FF, 0)
-                            matrixportal.set_text(centered_name, 0)
-                            safe_delay(3)
+                    # Display sign name in blue
+                    centered_name = center_multiline_string(
+                        clean_string(match["name"]), characters_per_line)
+                    print(f"Name display:\n{centered_name}")
+                    matrixportal.set_text_color(0x0000FF, 0)
+                    matrixportal.set_text(centered_name, 0)
+                    safe_delay(3)
 
-                            # Display sign message in road-sign yellow
-                            centered_msg = center_multiline_string(
-                                clean_string(sign["Messages"]).replace("\\n", "\n"),
-                                characters_per_line)
-                            print(f"Message display:\n{centered_msg}")
-                            matrixportal.set_text_color(sign_text_color, 0)
-                            matrixportal.set_text(centered_msg, 0)
-                            safe_delay(10)
+                    # Display sign message in road-sign yellow
+                    centered_msg = center_multiline_string(
+                        clean_string(match["msg"]).replace("\\n", "\n"),
+                        characters_per_line)
+                    print(f"Message display:\n{centered_msg}")
+                    matrixportal.set_text_color(sign_text_color, 0)
+                    matrixportal.set_text(centered_msg, 0)
+                    safe_delay(10)
             else:
                 print(f"Unexpected API response type: {type(json_data)}")
         else:
@@ -763,6 +785,8 @@ while True:
             except Exception:
                 pass
         json_data = None
+        matched_signs = None
+        gc.collect()
         gc.collect()
 
     print("Cycle complete. Waiting 30s...")
