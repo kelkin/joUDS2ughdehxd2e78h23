@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "1.1.4"
+LOCAL_VERSION = "1.1.5"
 
 # --- Imports ---
 import ssl
@@ -124,25 +124,41 @@ def log_exception(e):
             print(f"Exception logging failed: {e}")
 
 # --- Defensive adafruit_httpserver import with fallback ---
+# The library renamed its classes in newer versions:
+#   HTTPServer -> Server
+#   HTTPResponse -> Response
+#   HTTPMethod.GET -> GET (imported directly from methods)
+# We try the new names first, then fall back to the old names for compatibility.
 HAS_HTTPSERVER = False
 web_error_message = ""
 
 try:
-    from adafruit_httpserver.server import HTTPServer
-    from adafruit_httpserver.response import HTTPResponse
-    from adafruit_httpserver.methods import HTTPMethod
+    # New API (current): Server, Response, GET
+    from adafruit_httpserver.server import Server
+    from adafruit_httpserver.response import Response
+    from adafruit_httpserver.methods import GET
     HAS_HTTPSERVER = True
-except Exception as _direct_err:
+except Exception as _new_err:
     try:
-        from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
+        # Old API fallback: HTTPServer, HTTPResponse, HTTPMethod
+        from adafruit_httpserver.server import HTTPServer as Server
+        from adafruit_httpserver.response import HTTPResponse as Response
+        from adafruit_httpserver.methods import HTTPMethod
+        GET = HTTPMethod.GET
         HAS_HTTPSERVER = True
-    except Exception as _fallback_err:
-        HAS_HTTPSERVER = False
-        log_exception(_fallback_err)
+    except Exception as _old_err:
         try:
-            web_error_message = repr(_fallback_err).split("(")[0].split(".")[-1].replace("Error", "").upper()[:10]
-        except Exception:
-            web_error_message = "ERROR"
+            # Package-level fallback
+            from adafruit_httpserver import HTTPServer as Server, HTTPResponse as Response, HTTPMethod
+            GET = HTTPMethod.GET
+            HAS_HTTPSERVER = True
+        except Exception as _fallback_err:
+            HAS_HTTPSERVER = False
+            log_exception(_fallback_err)
+            try:
+                web_error_message = repr(_fallback_err).split("(")[0].split(".")[-1].replace("Error", "").upper()[:10]
+            except Exception:
+                web_error_message = "ERROR"
 
 # --- Configuration & Secrets ---
 try:
@@ -609,9 +625,9 @@ perform_ota_check(requests, force=False)
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
     try:
-        server = HTTPServer(pool)
+        server = Server(pool)
 
-        @server.route("/", HTTPMethod.GET)
+        @server.route("/", GET)
         def route_index(request):
             logs_html = web_logger.get_logs().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             body = (
@@ -630,12 +646,12 @@ if HAS_HTTPSERVER and pool is not None:
                 "<h2>Log Output:</h2><pre>" + logs_html + "</pre>"
                 "</body></html>"
             )
-            return HTTPResponse(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", body=body)
 
         server.start(str(wifi.radio.ipv4_address))
-        print(f"HTTPServer active at http://{wifi.radio.ipv4_address}/")
+        print(f"Web server active at http://{wifi.radio.ipv4_address}/")
     except Exception as e:
-        print(f"HTTPServer start failed: {e}")
+        print(f"Web server start failed: {e}")
         HAS_HTTPSERVER = False
 
 # --- Load Preferred Sign List ---
@@ -730,3 +746,4 @@ while True:
 
     print("Cycle complete. Waiting 30s...")
     safe_delay(30)
+
