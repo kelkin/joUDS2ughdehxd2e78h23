@@ -5,26 +5,26 @@
 """
 Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
 
-Fixes & Enhancements:
-- MatrixPortal hardware initialization moved OUTSIDE the loop.
-- SocketPool and Requests Session created once and reused.
-- Fixed off-by-one index bug when matching and displaying signs.
-- Implemented aggressive garbage collection to prevent memory exhaustion.
-- Integrated hardware Watchdog Timer to automatically reboot if frozen.
-- Keeps track of runtime cycles and recovers gracefully from network dropped states.
-- Integrated GitHub OTA (Over-The-Air) automatic self-update engine.
-- Displays local and cloud versions on the LED matrix during the update check sequence.
+Features:
+- Fetches live traffic sign data from the NY511 API and displays matched signs.
+- MatrixPortal hardware initialized once at startup (not inside the loop).
+- SocketPool and Requests Session created once and reused across cycles.
+- Aggressive garbage collection to prevent heap fragmentation/memory exhaustion.
+- Hardware Watchdog Timer (45s) automatically reboots the board if frozen.
+- Graceful WiFi reconnection with cycle tracking.
+- GitHub OTA (Over-The-Air) update engine driven by a JSON manifest file.
+  The manifest contains the target version string and a map of all files to
+  download, enabling full multi-file updates (code + libraries) in one pass.
+- Local and cloud version numbers displayed on the LED matrix at boot.
 
-Bugfixes in this revision:
-- FIX: All set_text_color() calls now use integer literals (0xRRGGBB) instead of
-       CSS hex strings ("#RRGGBB"). The MatrixPortal library only accepts integers;
-       passing a string caused a silent exception inside perform_ota_check(), making
-       OTA appear broken with no visible error output.
-- FIX: All set_text_color() calls now pass label index 0 as the second argument,
-       which is required when more than one text label exists on the display.
-- FIX: matrix_debug is now cast to bool before being passed to MatrixPortal(),
-       preventing str(False) == "False" from evaluating as truthy and enabling
-       unwanted debug output.
+Bugfixes applied:
+- set_text_color() calls use integer literals (0xRRGGBB), not CSS strings.
+- set_text_color() and set_text() pass label index 0 explicitly.
+- matrix_debug cast to bool before passing to MatrixPortal().
+- OTA version comparison now parses manifest JSON properly instead of
+  comparing the entire raw JSON blob to the local version string.
+- os.makedirs() replaced with per-level os.mkdir() (CircuitPython compatible).
+- All imports moved to module top level — no deferred imports inside functions.
 """
 
 import ssl
@@ -33,8 +33,12 @@ import socketpool
 import adafruit_requests
 import time
 import sys
+import os
+import json
+import traceback
 import terminalio
 import gc
+import microcontroller
 from microcontroller import watchdog as w
 from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
@@ -51,9 +55,10 @@ DATA_SOURCE_URL = (secrets["url_prefix"]) + (secrets["ny511key"]) + (secrets["ur
 
 # --- OTA Update Configuration (GitHub) ---
 ENABLE_OTA = secrets.get("enable_ota", False)
-LOCAL_VERSION = "1.1.1"  # Update this when pushing new code to GitHub!
+LOCAL_VERSION = "1.1.2"  # Update this when pushing new code to GitHub!
+# VERSION_URL must point to a JSON manifest (see perform_ota_check for format).
+# File download URLs are read from the manifest itself — no separate CODE_URL needed.
 VERSION_URL = secrets.get("github_version_url", "")
-CODE_URL = secrets.get("github_code_url", "")
 
 # Configuration settings
 debug = secrets.get("debug", 0)
@@ -134,16 +139,23 @@ ssl_context = ssl.create_default_context()
 requests = adafruit_requests.Session(pool, ssl_context)
 
 # --- GitHub self-updating OTA function ---
+# Expects VERSION_URL to point to a JSON manifest with this structure:
+# {
+#   "version": "1.1.2",
+#   "files": {
+#     "code.py": "https://raw.githubusercontent.com/.../code.py",
+#     "lib/adafruit_logging.py": "https://raw.githubusercontent.com/...",
+#     ...
+#   }
+# }
 def perform_ota_check(requests_session):
-    if not ENABLE_OTA or not VERSION_URL or not CODE_URL:
-        print("OTA Updates are disabled or URLs are not configured in secrets.py.")
+    if not ENABLE_OTA or not VERSION_URL:
+        print("OTA Updates are disabled or VERSION_URL is not configured in secrets.py.")
         return
 
     print(f"Checking for updates... Local Version: {LOCAL_VERSION}")
 
     # 1. Display Current Local Version on Boot
-    # FIX: Use integer color literals (0xRRGGBB) — the library does not accept "#RRGGBB" strings.
-    # FIX: Pass label index 0 as second argument to target the correct text label.
     matrixportal.set_text_color(0x00FFFF, 0)  # Cyan
     matrixportal.set_text(center_multiline_string(f"LOCAL VER\n{LOCAL_VERSION}", characters_per_line), 0)
     time.sleep(2)
@@ -152,65 +164,128 @@ def perform_ota_check(requests_session):
     response = None
     try:
         response = requests_session.get(VERSION_URL, timeout=10)
-        if response.status_code == 200:
-            remote_version = response.text.strip()
-            print(f"Remote version found on GitHub: '{remote_version}'")
+        if response.status_code != 200:
+            print(f"Failed to fetch manifest: HTTP {response.status_code}")
+            return
 
-            # 2. Display Latest Cloud Version
-            matrixportal.set_text_color(0xFFFF00, 0)  # Yellow
-            matrixportal.set_text(center_multiline_string(f"CLOUD VER\n{remote_version}", characters_per_line), 0)
-            time.sleep(2)
+        # Parse the JSON manifest — read text first, close stream, then parse
+        # to free the socket before allocating the parsed object
+        raw_text = response.text
+        response.close()
+        response = None
+        w.feed()
+        gc.collect()
+
+        try:
+            manifest = json.loads(raw_text)
+        except Exception as parse_err:
+            print(f"Failed to parse version manifest as JSON: {parse_err}")
+            print(f"Raw content received: {raw_text[:200]}")
+            return
+        finally:
+            raw_text = None
+            gc.collect()
+
+        remote_version = manifest.get("version", "").strip()
+        file_map = manifest.get("files", {})
+
+        if not remote_version:
+            print("Manifest is missing 'version' field. Aborting OTA.")
+            return
+
+        print(f"Remote version from manifest: '{remote_version}'")
+
+        # 2. Display Latest Cloud Version (just the version number, not the whole JSON)
+        matrixportal.set_text_color(0xFFFF00, 0)  # Yellow
+        matrixportal.set_text(center_multiline_string(f"CLOUD VER\n{remote_version}", characters_per_line), 0)
+        time.sleep(2)
+        w.feed()
+
+        if remote_version == LOCAL_VERSION:
+            print("Firmware is up to date!")
+            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text(center_multiline_string("VER VERIFIED\nUP TO DATE", characters_per_line), 0)
+            time.sleep(1.5)
+            return
+
+        # 3. New version available — download all files listed in the manifest
+        print(f"New version available: {remote_version}. Downloading {len(file_map)} file(s)...")
+        matrixportal.set_text_color(0x00FF00, 0)  # Green
+        matrixportal.set_text(center_multiline_string("UPDATING\nCODE...", characters_per_line), 0)
+        w.feed()
+
+        failed_files = []
+        total = len(file_map)
+        current = 0
+
+        for dest_path, file_url in file_map.items():
+            current += 1
             w.feed()
+            print(f"  [{current}/{total}] Downloading: {dest_path}")
 
-            if remote_version != LOCAL_VERSION:
-                print("New version available! Starting update download...")
-                matrixportal.set_text_color(0x00FF00, 0)  # Green
-                matrixportal.set_text(center_multiline_string("UPDATING\nCODE...", characters_per_line), 0)
-
-                # Close the version checker response stream before opening a new one
-                response.close()
-                response = None
-                w.feed()
-
-                # Download new code.py
-                response = requests_session.get(CODE_URL, timeout=15)
-                w.feed()  # Feed watchdog — GitHub download can be slow
-                if response.status_code == 200:
-                    new_code = response.text
-                    w.feed()
-
-                    print("Attempting to overwrite code.py...")
+            # CircuitPython only has os.mkdir() — no os.makedirs().
+            # For nested paths like lib/adafruit_httpserver/ we must create
+            # each directory level individually, ignoring errors if it exists.
+            parts = dest_path.split("/")
+            if len(parts) > 1:
+                path_so_far = ""
+                for part in parts[:-1]:  # Walk every directory segment, skip filename
+                    path_so_far = part if path_so_far == "" else path_so_far + "/" + part
                     try:
-                        with open("code.py", "w") as f:
-                            f.write(new_code)
-                        print("Update complete! Rebooting board...")
+                        os.mkdir(path_so_far)
+                        print(f"    Created dir: {path_so_far}")
+                    except OSError:
+                        pass  # Already exists — that's fine
 
-                        # 3. Display Successful Update State with the Target Version
-                        matrixportal.set_text_color(0x00FF00, 0)  # Green
-                        matrixportal.set_text(center_multiline_string(f"SUCCESS\nNEW: {remote_version}", characters_per_line), 0)
-                        time.sleep(4)
-
-                        import microcontroller
-                        microcontroller.reset()
-                    except OSError as fs_err:
-                        print(f"Filesystem Write Error: {fs_err}")
-                        print("Hint: Check boot.py — filesystem may not be remounted for board writes.")
-                        matrixportal.set_text_color(0xFF0000, 0)  # Red
-                        matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line), 0)
-                        time.sleep(5)
+            file_response = None
+            try:
+                file_response = requests_session.get(file_url, timeout=20)
+                w.feed()
+                if file_response.status_code == 200:
+                    with open(dest_path, "w") as f:
+                        f.write(file_response.text)
+                    print(f"    Saved: {dest_path}")
                 else:
-                    print(f"Failed to fetch code.py: HTTP {response.status_code}")
-            else:
-                print("Your firmware is up to date!")
-                matrixportal.set_text_color(0x00FF00, 0)  # Green
-                matrixportal.set_text(center_multiline_string("VER VERIFIED\nUP TO DATE", characters_per_line), 0)
-                time.sleep(1.5)
+                    print(f"    HTTP {file_response.status_code} for {dest_path} — skipping.")
+                    failed_files.append(dest_path)
+            except OSError as fs_err:
+                print(f"    Write error for {dest_path}: {fs_err}")
+                print("    Hint: Check boot.py — filesystem may not be remounted for board writes.")
+                failed_files.append(dest_path)
+                if dest_path == "code.py":
+                    # If we can't write code.py at all the filesystem is locked — abort early
+                    matrixportal.set_text_color(0xFF0000, 0)  # Red
+                    matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line), 0)
+                    time.sleep(5)
+                    return
+            except Exception as dl_err:
+                print(f"    Download error for {dest_path}: {dl_err}")
+                failed_files.append(dest_path)
+            finally:
+                if file_response is not None:
+                    try:
+                        file_response.close()
+                    except Exception:
+                        pass
+                gc.collect()
+
+        # 4. Report result and reboot
+        if failed_files:
+            print(f"Update completed with {len(failed_files)} failure(s): {failed_files}")
+            matrixportal.set_text_color(0xFF8800, 0)  # Orange — partial success
+            matrixportal.set_text(center_multiline_string(f"PARTIAL\n{len(failed_files)} FAIL", characters_per_line), 0)
         else:
-            print(f"Failed to fetch remote version: HTTP {response.status_code}")
+            print(f"All {total} file(s) updated successfully!")
+            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text(center_multiline_string(f"SUCCESS\nNEW:{remote_version}", characters_per_line), 0)
+
+        time.sleep(4)
+        print("Rebooting...")
+        microcontroller.reset()
+
     except Exception as ex:
         print(f"Error during OTA check: {ex}")
-        import traceback
-        traceback.print_exception(ex)  # Print full traceback so errors are visible
+        traceback.print_exception(ex)
     finally:
         if response is not None:
             try:
@@ -336,7 +411,6 @@ while True:
 
     except Exception as e:
         print(f"An error occurred during API fetch or display cycle: {e}")
-        import traceback
         traceback.print_exception(e)
 
     finally:
