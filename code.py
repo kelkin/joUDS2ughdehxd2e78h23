@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "1.1.5"
+LOCAL_VERSION = "1.1.6"
 
 # --- Imports ---
 import ssl
@@ -693,13 +693,34 @@ while True:
     response = None
     json_data = None
     try:
+        # Poll before the API fetch — browsers often connect right at cycle start
+        if HAS_HTTPSERVER and server is not None:
+            try: server.poll()
+            except Exception: pass
+        else:
+            poll_rescue_server()
+
         response = requests.get(DATA_SOURCE_URL, timeout=15)
         w.feed()
+
+        # Poll after fetch — JSON parsing of 900+ signs blocks for several seconds
+        if HAS_HTTPSERVER and server is not None:
+            try: server.poll()
+            except Exception: pass
+        else:
+            poll_rescue_server()
 
         if response.status_code == 200:
             print("API fetch successful. Parsing JSON...")
             json_data = response.json()
             w.feed()
+
+            # Poll after JSON parsing before starting the display loop
+            if HAS_HTTPSERVER and server is not None:
+                try: server.poll()
+                except Exception: pass
+            else:
+                poll_rescue_server()
 
             if isinstance(json_data, list):
                 print(f"Loaded {len(json_data)} signs from API.")
