@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "1.1.8"
+LOCAL_VERSION = "1.1.9"
 
 # --- Imports ---
 import ssl
@@ -661,7 +661,10 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", body=body)
 
-        server.start(str(wifi.radio.ipv4_address))
+        # Bind to "0.0.0.0" (all interfaces) rather than the specific IP string.
+        # The new adafruit_httpserver validates the IP via DNS lookup and rejects
+        # the ipv4_address object's string representation on some builds.
+        server.start("0.0.0.0", port=80)
         print(f"Web server active at http://{wifi.radio.ipv4_address}/")
     except Exception as e:
         print(f"Web server start failed: {e}")
@@ -791,4 +794,3 @@ while True:
 
     print("Cycle complete. Waiting 30s...")
     safe_delay(30)
-
