@@ -299,10 +299,9 @@ def poll_rescue_server():
         safe_send(conn, ".meta{color:#888;font-size:0.85em;margin-bottom:10px;}")
         safe_send(conn, "</style></head>")
         safe_send(conn, "<body>")
-        safe_send(conn, f"<h1>&#x1F6A8; Matrix Portal S3 &mdash; Rescue Console</h1>")
-        safe_send(conn, f"<div class='meta'>Firmware: v{LOCAL_VERSION} &nbsp;|&nbsp; "
-                        f"IP: {wifi.radio.ipv4_address} &nbsp;|&nbsp; "
-                        f"Free RAM: {gc.mem_free()} bytes</div>")
+        safe_send(conn, "<h1>&#x1F6A8; Matrix Portal S3 &mdash; Rescue Console</h1>")
+        meta = "<div class=\"meta\">Firmware: v" + LOCAL_VERSION + " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) + " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
+        safe_send(conn, meta)
         safe_send(conn, "<h2>Log Output:</h2><pre>")
         for line in web_logger.buffer:
             safe_send(conn, line + "\n")
@@ -585,18 +584,20 @@ if HAS_HTTPSERVER and pool is not None:
         def route_index(request):
             logs_html = web_logger.get_logs().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             body = (
-                f"<!DOCTYPE html><html><head><title>Matrix Portal S3</title>"
-                f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                f"<style>body{{font-family:monospace;background:#111;color:#ff3333;margin:20px;}}"
-                f"pre{{background:#000;padding:15px;border-radius:5px;color:#00ff00;"
-                f"white-space:pre-wrap;overflow-x:auto;}}"
-                f".meta{{color:#888;font-size:0.85em;margin-bottom:10px;}}</style></head>"
-                f"<body><h1>&#x1F6A8; Matrix Portal S3</h1>"
-                f"<div class='meta'>Firmware: v{LOCAL_VERSION} &nbsp;|&nbsp; "
-                f"IP: {wifi.radio.ipv4_address} &nbsp;|&nbsp; "
-                f"Free RAM: {gc.mem_free()} bytes</div>"
-                f"<h2>Log Output:</h2><pre>{logs_html}</pre>"
-                f"</body></html>"
+                "<!DOCTYPE html><html><head><title>Matrix Portal S3</title>"
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                "<style>"
+                "body{font-family:monospace;background:#111;color:#ff3333;margin:20px;}"
+                "pre{background:#000;padding:15px;border-radius:5px;color:#00ff00;"
+                "white-space:pre-wrap;overflow-x:auto;}"
+                ".meta{color:#888;font-size:0.85em;margin-bottom:10px;}"
+                "</style></head>"
+                "<body><h1>&#x1F6A8; Matrix Portal S3</h1>"
+                "<div class=\"meta\">Firmware: v" + LOCAL_VERSION +
+                " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
+                " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
+                "<h2>Log Output:</h2><pre>" + logs_html + "</pre>"
+                "</body></html>"
             )
             return HTTPResponse(request, content_type="text/html", body=body)
 
@@ -698,4 +699,3 @@ while True:
 
     print("Cycle complete. Waiting 30s...")
     safe_delay(30)
-
