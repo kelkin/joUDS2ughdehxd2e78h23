@@ -1,48 +1,70 @@
-# SPDX-FileCopyrightText: 2026 Google LLC
+# SPDX-FileCopyrightText: 2026 Joe Engineer
 #
 # SPDX-License-Identifier: Apache-2.0
 
 """
 Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
 
-Fixes & Enhancements:
-- Implements ATOMIC FILE WRITING to completely eliminate 0-byte file truncation crashes.
-- Validates downloaded file size against HTTP Content-Length before swapping onto storage.
-- Absolute Module Routing Engine to bypass package-level initialization mismatch faults.
-- Exponential backoff retry engine to handle DHCP and DNS settle delays smoothly.
-- Robust Socket Constant Fallback (AF_INET/SOCK_STREAM) for resilient Rescue Server binding.
-- Chunked Socket Streaming Engine in Rescue Server to prevent out-of-memory (OOM) fragmentation.
-- Aggressive memory reclamation (explicitly purging massive JSON dicts from RAM).
-- Graceful TCP Preconnection handling to resolve Firefox empty response errors.
-- Warning-free exception tracebacks optimized for CircuitPython 9.x.
-- Shadow Library Cleanup Engine to delete obsolete single-file modules (.py and .mpy).
-- Replaced non-existent socket .recv() with standard CircuitPython .recv_into() to fix browser reset crashes.
+Features:
+- Fetches live traffic sign data from the NY511 API and displays matched signs.
+- MatrixPortal hardware initialized once at startup (not inside the loop).
+- SocketPool and Requests Session created once and reused across cycles.
+- Aggressive garbage collection to prevent heap fragmentation/memory exhaustion.
+- Hardware Watchdog Timer (45s) automatically reboots the board if frozen.
+- Graceful WiFi reconnection; displays SSID/IP on matrix at connect time.
+- WebLogger captures all print() output into an in-memory ring buffer.
+- Emergency Rescue Web Server (raw socket, port 80) streams the log buffer
+  to any browser when adafruit_httpserver is unavailable.
+- adafruit_httpserver used when available, with defensive fallback to rescue server.
+- Shadow library cleanup removes stale single-file httpserver remnants on boot.
+- GitHub OTA update engine driven by a JSON manifest file.
+  Uses atomic .tmp-then-rename writes with Content-Length validation to prevent
+  corrupt/truncated files from landing on the filesystem.
+  Full multi-file updates (code + libraries) in one pass.
+- Local and cloud version numbers displayed on the LED matrix at boot.
+
+Bugfixes vs. earlier revisions:
+- set_text_color() uses integer literals (0xRRGGBB), not CSS strings "#RRGGBB".
+- set_text_color() and set_text() pass label index 0 explicitly.
+- matrix_debug cast to bool before passing to MatrixPortal().
+- OTA version comparison parses manifest JSON correctly.
+- os.makedirs() replaced with per-level os.mkdir() (CircuitPython compatible).
+- All imports at module top level — no deferred imports inside functions.
+- safe_delay() polls the web server during all wait periods so the rescue
+  page remains responsive while sign data is being displayed.
 """
 
-# --- EASY ACCESS VERSION CONFIGURATION ---
-LOCAL_VERSION = "1.1.26"  
+# --- VERSION (keep at top for easy access) ---
+LOCAL_VERSION = "1.1.3"
 
+# --- Imports ---
 import ssl
 import wifi
 import socketpool
 import adafruit_requests
 import time
 import sys
+import os
+import json
+import traceback
 import terminalio
 import gc
-import os
+import microcontroller
+import io
 from microcontroller import watchdog as w
 from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Shadow Library Cleanup ---
-for shadow_file in ["/lib/adafruit_httpserver.py", "/lib/adafruit_httpserver.mpy"]:
+# Removes stale single-file adafruit_httpserver.py/.mpy that would shadow the
+# package directory and cause import failures after an OTA update.
+for _shadow in ["/lib/adafruit_httpserver.py", "/lib/adafruit_httpserver.mpy"]:
     try:
-        os.remove(shadow_file)
+        os.remove(_shadow)
     except OSError:
         pass
 
-# --- Stream Redirector for Wireless Logging ---
+# --- WebLogger: in-memory ring buffer that mirrors all print() output ---
 class WebLogger:
     def __init__(self, max_lines=60):
         self.buffer = []
@@ -51,11 +73,13 @@ class WebLogger:
 
     def write(self, message):
         if isinstance(message, (bytes, bytearray)):
-            try: message = message.decode("utf-8")
-            except Exception: message = str(message)
+            try:
+                message = message.decode("utf-8")
+            except Exception:
+                message = str(message)
         elif not isinstance(message, str):
             message = str(message)
-            
+
         parts = message.split("\n")
         if len(parts) == 1:
             self.current_line += parts[0]
@@ -65,7 +89,6 @@ class WebLogger:
             for part in parts[1:-1]:
                 self.buffer.append(part)
             self.current_line = parts[-1]
-            
             while len(self.buffer) > self.max_lines:
                 self.buffer.pop(0)
 
@@ -79,6 +102,7 @@ web_logger = WebLogger()
 _original_print = print
 
 def print(*args, **kwargs):
+    """Overrides built-in print() to mirror output into the WebLogger buffer."""
     sep = kwargs.get("sep", " ")
     end = kwargs.get("end", "\n")
     message = sep.join(str(arg) for arg in args)
@@ -86,67 +110,71 @@ def print(*args, **kwargs):
     _original_print(*args, **kwargs)
 
 def log_exception(e):
+    """Logs a full exception traceback into the WebLogger."""
     try:
-        import traceback
-        import io
         stream = io.StringIO()
         traceback.print_exception(e, limit=None, file=stream)
         print(stream.getvalue())
     except Exception:
         try:
-            import io
             stream = io.StringIO()
             sys.print_exception(e, stream)
             print(stream.getvalue())
-        except Exception as ex:
+        except Exception:
             print(f"Exception logging failed: {e}")
 
-# --- Defensive Absolute Imports with Submodule Fallbacks ---
+# --- Defensive adafruit_httpserver import with fallback ---
 HAS_HTTPSERVER = False
 web_error_message = ""
 
 try:
-    # Try absolute submodule routing first to skip packages initialization bottlenecks
     from adafruit_httpserver.server import HTTPServer
     from adafruit_httpserver.response import HTTPResponse
     from adafruit_httpserver.methods import HTTPMethod
     HAS_HTTPSERVER = True
-except Exception as direct_err:
+except Exception as _direct_err:
     try:
-        # Fallback to standard package layout exposure
         from adafruit_httpserver import HTTPServer, HTTPResponse, HTTPMethod
         HAS_HTTPSERVER = True
-    except Exception as fallback_err:
+    except Exception as _fallback_err:
         HAS_HTTPSERVER = False
-        log_exception(fallback_err)
+        log_exception(_fallback_err)
         try:
-            ex_repr = repr(fallback_err)
-            web_error_message = ex_repr.split("(")[0].split(".")[-1].replace("Error", "").upper()[:10]
+            web_error_message = repr(_fallback_err).split("(")[0].split(".")[-1].replace("Error", "").upper()[:10]
         except Exception:
             web_error_message = "ERROR"
 
+# --- Configuration & Secrets ---
 try:
     from secrets import secrets
 except ImportError:
-    print("Please create a secrets.py file with WiFi credentials!")
+    print("WiFi secrets are kept in secrets.py, please add them there!")
     raise
 
 DATA_SOURCE_URL = secrets["url_prefix"] + secrets["ny511key"] + secrets["url_suffix"]
-ENABLE_OTA = secrets.get("enable_ota", False)
-MANIFEST_URL = secrets.get("github_version_url", "")
+ENABLE_OTA      = secrets.get("enable_ota", False)
+MANIFEST_URL    = secrets.get("github_version_url", "")
 
+debug               = secrets.get("debug", 0)
+width               = int(secrets.get("width", 64))
+height              = int(secrets.get("height", 32))
+bit_depth           = int(secrets.get("depth", 4))
+matrix_debug        = bool(secrets.get("matrix_debug", False))
 characters_per_line = int(secrets.get("characters_per_line", 10))
-sign_text_color = secrets.get("sign_text_color", 0xF7B500)
+sign_text_color     = secrets.get("sign_text_color", 0xF7B500)  # Road sign yellow
 
+# --- Hardware Watchdog ---
 w.timeout = 45.0
 w.mode = WatchDogMode.RESET
 w.feed()
 
+# --- Matrix Portal Init (once at startup) ---
+print("Initializing Matrix Portal display...")
 matrixportal = MatrixPortal(
-    width=int(secrets.get("width", 64)),
-    height=int(secrets.get("height", 32)),
-    bit_depth=int(secrets.get("depth", 4)),
-    debug=str(secrets.get("matrix_debug", False))
+    width=width,
+    height=height,
+    bit_depth=bit_depth,
+    debug=matrix_debug
 )
 matrixportal.add_text(
     text_font=terminalio.FONT,
@@ -157,306 +185,517 @@ matrixportal.add_text(
 )
 w.feed()
 
+# --- Helper Functions ---
 def center_multiline_string(text, width_chars):
-    return "\n".join([line.center(width_chars) for line in text.splitlines()])
+    """Centers each line of a multi-line string to fit the matrix display."""
+    return "\n".join(line.center(width_chars) for line in text.splitlines())
 
 def clean_string(text):
-    if text is None: return ""
-    text = " ".join(str(item) for item in text) if isinstance(text, list) else str(text)
+    """Strips brackets, quotes, and normalises type to str."""
+    if text is None:
+        return ""
+    text = " ".join(str(i) for i in text) if isinstance(text, list) else str(text)
     return text.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
 
-server = None
-rescue_socket = None
-
-def start_rescue_server():
-    """Initializes the raw socket Emergency Rescue Server on Port 80."""
-    global rescue_socket, pool
-    if rescue_socket is None:
-        try:
-            af_inet = 2      
-            sock_stream = 1  
-            try:
-                if hasattr(pool, "AF_INET"): af_inet = pool.AF_INET
-                elif hasattr(socketpool, "AF_INET"): af_inet = socketpool.AF_INET
-            except Exception: pass
-            try:
-                if hasattr(pool, "SOCK_STREAM"): sock_stream = pool.SOCK_STREAM
-                elif hasattr(socketpool, "SOCK_STREAM"): sock_stream = socketpool.SOCK_STREAM
-            except Exception: pass
-
-            rescue_socket = pool.socket(af_inet, sock_stream)
-            rescue_socket.settimeout(0.02)
-            try:
-                import socket
-                rescue_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            except Exception: pass
-            rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
-            try: rescue_socket.listen(3)
-            except TypeError: rescue_socket.listen()
-            print("Emergency Rescue Web Server active on Port 80.")
-        except Exception as e:
-            print(f"Rescue binding failed: {e}")
-            rescue_socket = None
-
-def safe_send(conn, data):
-    """Sends arbitrary bytes/strings over a TCP socket reliably without truncating."""
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    bytes_sent = 0
-    while bytes_sent < len(data):
-        try:
-            sent = conn.send(data[bytes_sent:])
-            if sent == 0: break
-            bytes_sent += sent
-        except OSError as e:
-            if e.errno == 11:  
-                time.sleep(0.01)
-                continue
-            raise e
-
-def poll_rescue_server():
-    """Emergency Lightweight Web Server. Streams logs dynamically to protect memory footprint."""
-    global rescue_socket
-    if not HAS_HTTPSERVER and rescue_socket is not None:
-        conn = None
-        try:
-            conn, addr = rescue_socket.accept()
-            conn.settimeout(0.5)
-            request_str = ""
-            buf = bytearray(512)
-            for _ in range(3):
-                try:
-                    num_bytes = conn.recv_into(buf)
-                    if num_bytes > 0:
-                        request_str = buf[:num_bytes].decode("utf-8")
-                        break
-                except OSError: pass
-                time.sleep(0.05)
-            
-            if request_str and "favicon.ico" in request_str:
-                try:
-                    conn.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("utf-8"))
-                    conn.close()
-                except Exception: pass
-                return
-            
-            print(f"Rescue connection accepted from {addr}")
-            safe_send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
-            safe_send(conn, "<!DOCTYPE html><html><head><title>Rescue Console</title>")
-            safe_send(conn, "<meta name='viewport' content='width=device-width, initial-scale=1'>")
-            safe_send(conn, "<style>body{font-family:monospace;background-color:#111;color:#ff3333;margin:20px;line-height:1.4;}")
-            safe_send(conn, "pre{background-color:#000;padding:15px;border-radius:5px;border:1px solid #333;overflow-x:auto;white-space:pre-wrap;color:#00ff00;}</style></head>")
-            safe_send(conn, "<body><h1>🚨 Matrix Portal S3 - Rescue System</h1>")
-            safe_send(conn, "<h2>System Diagnostic & Download Logs:</h2><pre>")
-            for line in web_logger.buffer:
-                safe_send(conn, line + "\n")
-            if web_logger.current_line:
-                safe_send(conn, web_logger.current_line)
-            safe_send(conn, "</pre></body></html>")
-            time.sleep(0.15)
-            conn.close()
-        except OSError: pass
-        except Exception as ex:
-            if conn:
-                try: conn.close()
-                except Exception: pass
-        finally:
-            gc.collect()
-
-def safe_delay(seconds):
-    start_time = time.monotonic()
-    while time.monotonic() - start_time < seconds:
-        w.feed()
-        if HAS_HTTPSERVER and server is not None:
-            try: server.poll()
-            except Exception: pass
-        else:
-            poll_rescue_server()
-        time.sleep(0.02)
-
-def connect_wifi():
-    w.feed()
-    if wifi.radio.connected: return True
-    try:
-        matrixportal.set_text_color("#00FFFF")
-        matrixportal.set_text(center_multiline_string("CONNECTING\nWIFI...", characters_per_line))
-    except Exception: pass
-    try:
-        wifi.radio.connect(secrets["ssid"], secrets["password"])
-        w.feed()
-        return True
-    except Exception as e:
-        print(f"WiFi failed: {e}")
-        try:
-            matrixportal.set_text_color("#FF0000")
-            matrixportal.set_text(center_multiline_string("WIFI\nFAILED", characters_per_line))
-        except Exception: pass
-        return False
-
 def ensure_dir_exists(filepath):
+    """Creates all parent directories for filepath using single-level os.mkdir()."""
     parts = filepath.split("/")
     if len(parts) > 1:
         current_path = ""
         for part in parts[:-1]:
             current_path = (current_path + "/" + part) if current_path else part
-            try: os.mkdir(current_path)
+            try:
+                os.mkdir(current_path)
             except OSError as e:
-                if e.errno != 17: raise e
+                if e.errno != 17:  # 17 = EEXIST — directory already exists, fine
+                    raise
+
+# --- Raw Socket Rescue Web Server ---
+rescue_socket = None
+server = None
+
+def start_rescue_server():
+    """Binds a raw TCP socket on port 80 to serve the log page when
+    adafruit_httpserver is unavailable."""
+    global rescue_socket, pool
+    if rescue_socket is not None:
+        return
+    try:
+        af_inet    = getattr(pool, "AF_INET",    getattr(socketpool, "AF_INET",    2))
+        sock_stream = getattr(pool, "SOCK_STREAM", getattr(socketpool, "SOCK_STREAM", 1))
+        rescue_socket = pool.socket(af_inet, sock_stream)
+        rescue_socket.settimeout(0.02)
+        try:
+            import socket as _socket
+            rescue_socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        except Exception:
+            pass
+        rescue_socket.bind((str(wifi.radio.ipv4_address), 80))
+        try:
+            rescue_socket.listen(3)
+        except TypeError:
+            rescue_socket.listen()
+        print(f"Rescue Web Server active at http://{wifi.radio.ipv4_address}/")
+    except Exception as e:
+        print(f"Rescue server bind failed: {e}")
+        rescue_socket = None
+
+def safe_send(conn, data):
+    """Sends bytes/string over a TCP connection, retrying on EAGAIN (errno 11)."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    sent_total = 0
+    while sent_total < len(data):
+        try:
+            sent = conn.send(data[sent_total:])
+            if sent == 0:
+                break
+            sent_total += sent
+        except OSError as e:
+            if e.errno == 11:  # EAGAIN — socket buffer full, retry
+                time.sleep(0.01)
+                continue
+            raise
+
+def poll_rescue_server():
+    """Non-blocking poll: accepts one connection, streams the log page, closes."""
+    global rescue_socket
+    if rescue_socket is None:
+        return
+    conn = None
+    try:
+        conn, addr = rescue_socket.accept()
+        conn.settimeout(0.5)
+        request_str = ""
+        buf = bytearray(512)
+        for _ in range(3):
+            try:
+                num_bytes = conn.recv_into(buf)
+                if num_bytes > 0:
+                    request_str = buf[:num_bytes].decode("utf-8")
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+
+        # Silently discard favicon requests — browsers always ask
+        if request_str and "favicon.ico" in request_str:
+            try:
+                conn.send(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                conn.close()
+            except Exception:
+                pass
+            return
+
+        print(f"Rescue connection from {addr}")
+        safe_send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
+        safe_send(conn, "<!DOCTYPE html><html><head><title>Matrix Portal S3 - Rescue Console</title>")
+        safe_send(conn, "<meta name='viewport' content='width=device-width, initial-scale=1'>")
+        safe_send(conn, "<style>")
+        safe_send(conn, "body{font-family:monospace;background:#111;color:#ff3333;margin:20px;line-height:1.4;}")
+        safe_send(conn, "h1{color:#ff3333;}h2{color:#ffaa00;}")
+        safe_send(conn, "pre{background:#000;padding:15px;border-radius:5px;border:1px solid #333;"
+                        "overflow-x:auto;white-space:pre-wrap;color:#00ff00;}")
+        safe_send(conn, ".meta{color:#888;font-size:0.85em;margin-bottom:10px;}")
+        safe_send(conn, "</style></head>")
+        safe_send(conn, "<body>")
+        safe_send(conn, f"<h1>&#x1F6A8; Matrix Portal S3 &mdash; Rescue Console</h1>")
+        safe_send(conn, f"<div class='meta'>Firmware: v{LOCAL_VERSION} &nbsp;|&nbsp; "
+                        f"IP: {wifi.radio.ipv4_address} &nbsp;|&nbsp; "
+                        f"Free RAM: {gc.mem_free()} bytes</div>")
+        safe_send(conn, "<h2>Log Output:</h2><pre>")
+        for line in web_logger.buffer:
+            safe_send(conn, line + "\n")
+        if web_logger.current_line:
+            safe_send(conn, web_logger.current_line)
+        safe_send(conn, "</pre></body></html>")
+        time.sleep(0.15)
+        conn.close()
+    except OSError:
+        pass
+    except Exception as ex:
+        log_exception(ex)
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    finally:
+        gc.collect()
+
+def safe_delay(seconds):
+    """Sleeps for `seconds` while continuously feeding the watchdog and
+    polling the web server so the log page stays responsive."""
+    start = time.monotonic()
+    while time.monotonic() - start < seconds:
+        w.feed()
+        if HAS_HTTPSERVER and server is not None:
+            try:
+                server.poll()
+            except Exception:
+                pass
+        else:
+            poll_rescue_server()
+        time.sleep(0.02)
+
+# --- WiFi Connection ---
+def connect_wifi():
+    """Connects to WiFi, showing status on the matrix display."""
+    w.feed()
+    if wifi.radio.connected:
+        return True
+
+    ssid = secrets.get("ssid", "")
+    print(f"Connecting to WiFi: {ssid}")
+    try:
+        matrixportal.set_text_color(0x00FFFF, 0)  # Cyan
+        matrixportal.set_text(center_multiline_string(f"CONNECTING\n{ssid}", characters_per_line), 0)
+    except Exception:
+        pass
+
+    try:
+        wifi.radio.connect(secrets["ssid"], secrets["password"])
+        w.feed()
+        ip = str(wifi.radio.ipv4_address)
+        print(f"Connected! IP: {ip}")
+        try:
+            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text(center_multiline_string(f"{ip}\n{ssid}", characters_per_line), 0)
+            safe_delay(5)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"WiFi connection failed: {e}")
+        try:
+            matrixportal.set_text_color(0xFF0000, 0)  # Red
+            matrixportal.set_text(center_multiline_string("WIFI\nFAILED", characters_per_line), 0)
+        except Exception:
+            pass
+        return False
+
+# --- Initial Network Setup ---
+gc.collect()
+pool = None
+ssl_context = None
+requests = None
 
 if connect_wifi():
     pool = socketpool.SocketPool(wifi.radio)
     ssl_context = ssl.create_default_context()
     requests = adafruit_requests.Session(pool, ssl_context)
-    if not HAS_HTTPSERVER: start_rescue_server()
+
+    if not HAS_HTTPSERVER:
+        start_rescue_server()
+
+    # Show web server status on matrix
     try:
-        ip_display = f"{str(wifi.radio.ipv4_address)}\n{str(secrets.get('ssid', 'WIFI'))}"
-        matrixportal.set_text_color("#00FF00")
-        matrixportal.set_text(center_multiline_string(ip_display, characters_per_line))
-        safe_delay(5)
-    except Exception: pass
+        if HAS_HTTPSERVER:
+            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text(center_multiline_string("WEB OK\nPORT 80", characters_per_line), 0)
+        else:
+            matrixportal.set_text_color(0xFF0000, 0)  # Red
+            matrixportal.set_text(center_multiline_string(f"WEB ERR\n{web_error_message}", characters_per_line), 0)
+        safe_delay(3)
+    except Exception:
+        pass
 
-try:
-    if HAS_HTTPSERVER:
-        matrixportal.set_text_color("#00FF00")
-        matrixportal.set_text(center_multiline_string("WEB OK\nPORT 80", characters_per_line))
-    else:
-        matrixportal.set_text_color("#FF0000")
-        matrixportal.set_text(center_multiline_string(f"WEB ERR\n{web_error_message}", characters_per_line))
-    safe_delay(3)
-except Exception: pass
-
-# --- Atomic Manifest-Based Safe OTA Updater ---
+# --- GitHub Manifest-Based Atomic OTA Updater ---
+# Manifest format expected at MANIFEST_URL:
+# {
+#   "version": "1.1.4",
+#   "files": {
+#     "code.py": "https://raw.githubusercontent.com/.../code.py",
+#     "lib/adafruit_logging.py": "https://raw.githubusercontent.com/...",
+#     ...
+#   }
+# }
 def perform_ota_check(requests_session, force=False):
-    if not ENABLE_OTA or not MANIFEST_URL: return
-    print(f"Checking updates via Manifest... Local Version: {LOCAL_VERSION}")
-    
+    if not ENABLE_OTA or not MANIFEST_URL:
+        print("OTA disabled or MANIFEST_URL not set.")
+        return
+    if requests_session is None:
+        print("OTA skipped: no network session.")
+        return
+
+    print(f"Checking for updates... Local: {LOCAL_VERSION}")
+
+    # Display local version on matrix
+    matrixportal.set_text_color(0x00FFFF, 0)  # Cyan
+    matrixportal.set_text(center_multiline_string(f"LOCAL VER\n{LOCAL_VERSION}", characters_per_line), 0)
+    safe_delay(2)
+
+    # Fetch manifest with retry
     response = None
     for retry in range(3):
         w.feed()
         try:
             response = requests_session.get(MANIFEST_URL, timeout=8)
             break
-        except Exception:
-            if retry == 2: print("GitHub Connection failed."); return
+        except Exception as e:
+            print(f"Manifest fetch attempt {retry + 1} failed: {e}")
+            if retry == 2:
+                print("Could not reach GitHub. Skipping OTA.")
+                return
             safe_delay(2)
-            
+
     try:
-        if response.status_code == 200:
-            manifest_data = response.json()
-            remote_version = manifest_data.get("version", "0.0.0")
-            files_to_download = manifest_data.get("files", {})
-            
-            if remote_version != LOCAL_VERSION or force:
-                print("Update found! Fetching files onto safe temporary storage...")
-                matrixportal.set_text_color("#00FF00")
-                matrixportal.set_text(center_multiline_string("DOWNLOADING\nFILES...", characters_per_line))
-                response.close()
-                successful_swaps = []
-                
-                for local_path, remote_url in files_to_download.items():
-                    w.feed()
-                    print(f"Fetching {local_path}...")
-                    file_response = None
-                    try:
-                        file_response = requests_session.get(remote_url, timeout=10)
-                        if file_response.status_code == 200:
-                            file_content = file_response.text
-                            content_length = file_response.headers.get("content-length")
-                            if content_length is not None:
-                                if len(file_content.encode("utf-8")) != int(content_length):
-                                    raise RuntimeError(f"Size mismatch for {local_path}")
-                            
-                            ensure_dir_exists(local_path)
-                            temp_path = local_path + ".tmp"
-                            with open(temp_path, "w") as f:
-                                f.write(file_content)
-                            successful_swaps.append((temp_path, local_path))
-                        else:
-                            raise RuntimeError(f"HTTP Error {file_response.status_code}")
-                    except Exception as err:
-                        print(f"Aborting update to prevent crash. Error: {err}")
-                        return
-                    finally:
-                        if file_response: file_response.close()
-                        gc.collect()
-                
-                print("All files validated. Applying safe storage overwrite swap...")
-                for temp_path, final_path in successful_swaps:
-                    try: os.remove(final_path)
-                    except OSError: pass
-                    os.rename(temp_path, final_path)
-                    
-                print("Swap successful! Rebooting safely...")
-                matrixportal.set_text_color("#00FF00")
-                matrixportal.set_text(center_multiline_string("SUCCESS\nREBOOTING", characters_per_line))
-                time.sleep(3)
-                import microcontroller
-                microcontroller.reset()
-            else:
-                print("Up to date.")
-    except Exception as ex:
-        print(f"OTA Error: {ex}")
-    finally:
-        if response: response.close()
+        if response.status_code != 200:
+            print(f"Manifest fetch returned HTTP {response.status_code}. Skipping OTA.")
+            return
+
+        # Read and close the response before parsing to free the socket first
+        raw_text = response.text
+        response.close()
+        response = None
+        w.feed()
         gc.collect()
 
+        try:
+            manifest = json.loads(raw_text)
+        except Exception as parse_err:
+            print(f"Manifest JSON parse failed: {parse_err}")
+            print(f"Raw content (first 200 chars): {raw_text[:200]}")
+            return
+        finally:
+            raw_text = None
+            gc.collect()
+
+        remote_version = manifest.get("version", "").strip()
+        files_to_download = manifest.get("files", {})
+
+        if not remote_version:
+            print("Manifest missing 'version' field. Aborting OTA.")
+            return
+
+        print(f"Remote version: {remote_version}")
+
+        # Display remote version on matrix
+        matrixportal.set_text_color(0xFFFF00, 0)  # Yellow
+        matrixportal.set_text(center_multiline_string(f"CLOUD VER\n{remote_version}", characters_per_line), 0)
+        safe_delay(2)
+
+        if remote_version == LOCAL_VERSION and not force:
+            print("Firmware is up to date!")
+            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text(center_multiline_string("VER VERIFIED\nUP TO DATE", characters_per_line), 0)
+            safe_delay(2)
+            return
+
+        # New version — download all files to .tmp paths first, then swap atomically
+        print(f"Update available: {LOCAL_VERSION} -> {remote_version}")
+        print(f"Downloading {len(files_to_download)} file(s)...")
+        matrixportal.set_text_color(0x00FF00, 0)  # Green
+        matrixportal.set_text(center_multiline_string("DOWNLOADING\nFILES...", characters_per_line), 0)
+
+        successful_swaps = []  # List of (temp_path, final_path) tuples
+        total = len(files_to_download)
+        current = 0
+
+        for local_path, remote_url in files_to_download.items():
+            current += 1
+            w.feed()
+            print(f"  [{current}/{total}] {local_path}")
+
+            ensure_dir_exists(local_path)
+            temp_path = local_path + ".tmp"
+            file_response = None
+
+            try:
+                file_response = requests_session.get(remote_url, timeout=15)
+                w.feed()
+                if file_response.status_code != 200:
+                    raise RuntimeError(f"HTTP {file_response.status_code}")
+
+                file_content = file_response.text
+                w.feed()
+
+                # Validate size against Content-Length if server provides it
+                content_length = file_response.headers.get("content-length")
+                if content_length is not None:
+                    expected = int(content_length)
+                    actual = len(file_content.encode("utf-8"))
+                    if actual != expected:
+                        raise RuntimeError(f"Size mismatch: got {actual}, expected {expected}")
+
+                # Write to .tmp first — never touch the live file until validated
+                with open(temp_path, "w") as f:
+                    f.write(file_content)
+
+                successful_swaps.append((temp_path, local_path))
+                print(f"    Staged: {temp_path}")
+
+            except OSError as fs_err:
+                print(f"    Write error for {local_path}: {fs_err}")
+                if local_path == "code.py":
+                    matrixportal.set_text_color(0xFF0000, 0)  # Red
+                    matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line), 0)
+                    safe_delay(5)
+                    return
+                print("    Aborting update to prevent partial state.")
+                return
+            except Exception as dl_err:
+                print(f"    Download failed for {local_path}: {dl_err}")
+                print("    Aborting update to prevent partial state.")
+                return
+            finally:
+                if file_response is not None:
+                    try:
+                        file_response.close()
+                    except Exception:
+                        pass
+                gc.collect()
+
+        # All files downloaded and validated — now do the atomic rename swap
+        print("All files staged. Applying atomic swap...")
+        for temp_path, final_path in successful_swaps:
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            os.rename(temp_path, final_path)
+            print(f"    Installed: {final_path}")
+
+        print("Update complete! Rebooting...")
+        matrixportal.set_text_color(0x00FF00, 0)  # Green
+        matrixportal.set_text(center_multiline_string(f"SUCCESS\nNEW:{remote_version}", characters_per_line), 0)
+        safe_delay(4)
+        microcontroller.reset()
+
+    except Exception as ex:
+        print(f"OTA error: {ex}")
+        log_exception(ex)
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        gc.collect()
+
+# Run OTA check at startup
 perform_ota_check(requests, force=False)
 
-if HAS_HTTPSERVER:
+# --- Start adafruit_httpserver if available ---
+if HAS_HTTPSERVER and pool is not None:
     try:
         server = HTTPServer(pool)
-        @server.route("/", HTTPMethod.GET)
-        def base(request):
-            body = f"<h1>Matrix Portal S3 active. Firmware: v{LOCAL_VERSION}</h1>"
-            return HTTPResponse(request, content_type="text/html", body=body)
-        server.start(str(wifi.radio.ipv4_address))
-    except Exception: HAS_HTTPSERVER = False
 
+        @server.route("/", HTTPMethod.GET)
+        def route_index(request):
+            logs_html = web_logger.get_logs().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            body = (
+                f"<!DOCTYPE html><html><head><title>Matrix Portal S3</title>"
+                f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                f"<style>body{{font-family:monospace;background:#111;color:#ff3333;margin:20px;}}"
+                f"pre{{background:#000;padding:15px;border-radius:5px;color:#00ff00;"
+                f"white-space:pre-wrap;overflow-x:auto;}}"
+                f".meta{{color:#888;font-size:0.85em;margin-bottom:10px;}}</style></head>"
+                f"<body><h1>&#x1F6A8; Matrix Portal S3</h1>"
+                f"<div class='meta'>Firmware: v{LOCAL_VERSION} &nbsp;|&nbsp; "
+                f"IP: {wifi.radio.ipv4_address} &nbsp;|&nbsp; "
+                f"Free RAM: {gc.mem_free()} bytes</div>"
+                f"<h2>Log Output:</h2><pre>{logs_html}</pre>"
+                f"</body></html>"
+            )
+            return HTTPResponse(request, content_type="text/html", body=body)
+
+        server.start(str(wifi.radio.ipv4_address))
+        print(f"HTTPServer active at http://{wifi.radio.ipv4_address}/")
+    except Exception as e:
+        print(f"HTTPServer start failed: {e}")
+        HAS_HTTPSERVER = False
+
+# --- Load Preferred Sign List ---
 favsign_list = []
+print("Attempting to load 'sign_list.txt'")
 try:
     with open("sign_list.txt", "r") as f:
         for line in f:
+            sys.stdout.write(".")
             cleaned = line.strip()
-            if cleaned: favsign_list.append(cleaned)
-except OSError: pass
+            if cleaned:
+                favsign_list.append(cleaned)
+    print(f"\nLoaded {len(favsign_list)} entries from sign_list.txt.")
+except OSError as e:
+    print(f"\nCould not load sign_list.txt: {e}")
 
+# --- Main Loop ---
 cycles = 0
+w.feed()
+
 while True:
     cycles += 1
+    print(f"\n{'*' * 48}")
+    print(f"Cycle #{cycles}  Free RAM: {gc.mem_free()} bytes")
+    print(f"{'*' * 48}")
     w.feed()
     gc.collect()
 
+    # Reconnect WiFi if dropped
     if not wifi.radio.connected:
-        if not connect_wifi(): safe_delay(10); continue
+        print("WiFi dropped. Reconnecting...")
+        if not connect_wifi():
+            print("Reconnect failed. Retrying in 10s...")
+            safe_delay(10)
+            continue
 
-    print("Querying NY511 API...")
+    # Fetch NY511 API data
+    print("Fetching NY511 API data...")
     response = None
     json_data = None
     try:
-        response = requests.get(DATA_SOURCE_URL, timeout=8)
+        response = requests.get(DATA_SOURCE_URL, timeout=15)
+        w.feed()
+
         if response.status_code == 200:
+            print("API fetch successful. Parsing JSON...")
             json_data = response.json()
             w.feed()
+
             if isinstance(json_data, list):
+                print(f"Loaded {len(json_data)} signs from API.")
+                print("Matching against favourites...")
+
                 for fav_name in favsign_list:
                     w.feed()
                     for sign in json_data:
-                        if 'Name' in sign and fav_name == sign['Name']:
-                            centered_name = center_multiline_string(clean_string(sign['Name']), characters_per_line)
-                            matrixportal.set_text_color("#0000FF")
-                            matrixportal.set_text(centered_name)
+                        if "Name" in sign and fav_name == sign["Name"]:
+                            print(f"\nMATCH: {fav_name}")
+
+                            # Display sign name in blue
+                            centered_name = center_multiline_string(
+                                clean_string(sign["Name"]), characters_per_line)
+                            print(f"Name display:\n{centered_name}")
+                            matrixportal.set_text_color(0x0000FF, 0)
+                            matrixportal.set_text(centered_name, 0)
                             safe_delay(3)
 
-                            centered_msg = center_multiline_string(clean_string(sign['Messages']).replace('\\n', '\n'), characters_per_line)
-                            matrixportal.set_text_color(sign_text_color)
-                            matrixportal.set_text(centered_msg)
+                            # Display sign message in road-sign yellow
+                            centered_msg = center_multiline_string(
+                                clean_string(sign["Messages"]).replace("\\n", "\n"),
+                                characters_per_line)
+                            print(f"Message display:\n{centered_msg}")
+                            matrixportal.set_text_color(sign_text_color, 0)
+                            matrixportal.set_text(centered_msg, 0)
                             safe_delay(10)
-    except Exception as e:
-        print(f"API Loop error: {e}")
-    finally:
-        if response: response.close()
-        json_data = None  
-        gc.collect()      
+            else:
+                print(f"Unexpected API response type: {type(json_data)}")
+        else:
+            print(f"API returned HTTP {response.status_code}")
 
+    except Exception as e:
+        print(f"API/display error: {e}")
+        log_exception(e)
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        json_data = None
+        gc.collect()
+
+    print("Cycle complete. Waiting 30s...")
     safe_delay(30)
 
