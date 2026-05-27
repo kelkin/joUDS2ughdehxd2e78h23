@@ -228,11 +228,40 @@ def hex_to_int(hex_str):
     except Exception:
         return 0xF7B500  # fallback to sign yellow
 
+def remap_color(rgb_int, order):
+    """Remap a 'what you want to see' RGB integer to the value that must be
+    sent to set_text_color() to produce the correct color on screen given
+    the hardware's channel order (color_order setting).
+
+    Example: with BGR order, to display yellow (#FFFF00) the hardware needs
+    to receive cyan (#00FFFF) because it swaps R and B channels.
+    With RGB order the value passes through unchanged.
+    """
+    r = (rgb_int >> 16) & 0xFF
+    g = (rgb_int >> 8)  & 0xFF
+    b =  rgb_int        & 0xFF
+    mapping = {
+        "RGB": (r, g, b),
+        "RBG": (r, b, g),
+        "GRB": (g, r, b),
+        "GBR": (g, b, r),
+        "BRG": (b, r, g),
+        "BGR": (b, g, r),
+    }
+    out = mapping.get(order.upper(), (r, g, b))
+    return (out[0] << 16) | (out[1] << 8) | out[2]
+
+def color_for_display(hex_str):
+    """Convert a hex color string to the remapped integer needed by set_text_color()
+    given the current color_order setting. Use this everywhere instead of hex_to_int()
+    for colors that will be displayed on the matrix."""
+    return remap_color(hex_to_int(hex_str), color_order)
+
 settings = load_settings()
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
-sign_text_color     = [hex_to_int(settings.get("sign_text_color", "#F7B500"))]  # Mutable — works across closures
-sign_name_color     = [hex_to_int(settings.get("sign_name_color",  "#0000FF"))]  # Mutable — sign name header color
+sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]  # Remapped for hardware color order
+sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000FF"))]  # Remapped for hardware color order
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
@@ -378,7 +407,7 @@ matrixportal.add_text(
     text_position=(0, 15),
     scrolling=False,
     line_spacing=0.8,
-    text_color=sign_text_color[0]  # loaded from settings.json
+    text_color=sign_text_color[0]  # remapped for hardware color order
 )
 w.feed()
 
@@ -1118,8 +1147,8 @@ if HAS_HTTPSERVER and pool is not None:
                 name_disp_secs   = new_name_secs
                 msg_disp_secs    = new_msg_secs
                 cycle_sleep_secs = new_cycle_secs
-                sign_text_color[0] = hex_to_int(new_color)
-                sign_name_color[0] = hex_to_int(new_name_color)
+                sign_text_color[0] = color_for_display(new_color)
+                sign_name_color[0] = color_for_display(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
 
                 status = ("Saved! Reboot required to apply color order change." if new_order != color_order else "Saved!") if ok else "Save failed."
@@ -1545,8 +1574,8 @@ if HAS_HTTPSERVER and pool is not None:
                         # Reload settings into memory
                         loaded = load_settings()
                         settings.update(loaded)
-                        sign_text_color[0] = hex_to_int(settings.get("sign_text_color","#F7B500"))
-                        sign_name_color[0] = hex_to_int(settings.get("sign_name_color","#0000FF"))
+                        sign_text_color[0] = color_for_display(settings.get("sign_text_color","#F7B500"))
+                        sign_name_color[0] = color_for_display(settings.get("sign_name_color","#0000FF"))
                         matrixportal.set_text_color(sign_text_color[0], 0)
                         status_lines.append("&#x2713; settings.json synced")
                     else:
