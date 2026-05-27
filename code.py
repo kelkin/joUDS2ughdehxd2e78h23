@@ -185,6 +185,7 @@ _default_settings = {
     "sign_text_color":      "#F7B500",  # Road sign yellow for sign message
     "name_display_seconds": 3,
     "msg_display_seconds":  10,
+    "page_display_seconds": 5,
     "cycle_sleep_seconds":  30,
     "width":                192,     # Total display width in pixels (64 x num panels)
     "height":               32,      # Display height in pixels
@@ -265,6 +266,7 @@ sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
+page_disp_secs      = int(settings.get("page_display_seconds", 5))
 characters_per_line = int(settings.get("characters_per_line", 30))
 width               = int(settings.get("width", 192))
 height              = int(settings.get("height", 32))
@@ -422,6 +424,62 @@ def clean_string(text):
         return ""
     text = " ".join(str(i) for i in text) if isinstance(text, list) else str(text)
     return text.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
+
+def paginate_message(msg_string, lines_per_page=3):
+    """Split a raw message string into display pages.
+
+    Handles both \n separators in the raw string and the literal backslash-n
+    that sometimes appears in the API data. Returns a list of strings, each
+    containing at most lines_per_page lines joined by newlines.
+
+    Example:
+        "LINE1\nLINE2\nLINE3\nLINE4\nLINE5" with lines_per_page=3
+        -> ["LINE1\nLINE2\nLINE3", "LINE4\nLINE5"]
+    """
+    # Normalise escaped newlines from API
+    normalised = msg_string.replace("\\n", "\n").replace("\n", "\n")
+    lines = [l for l in normalised.split("\n") if l.strip()]
+    pages = []
+    for i in range(0, max(1, len(lines)), lines_per_page):
+        pages.append("\n".join(lines[i:i + lines_per_page]))
+    return pages if pages else [""]
+
+def display_sign(match, name_secs, page_secs, lines_per_page=3):
+    """Display one matched sign: name first, then all message pages in order.
+
+    match dict: {"name": str, "msg": list_or_str}
+    - msg may be a list of separate messages (each possibly multi-line)
+      or a plain string (legacy single-message signs).
+    - Each message is paginated to lines_per_page lines per screen.
+    - Sign name shown once; all pages of all messages follow.
+    """
+    # Show sign name
+    clean_name = clean_string(match["name"])
+    centered_name = center_multiline_string(clean_name, characters_per_line)
+    print(f"Name: {clean_name}")
+    matrixportal.set_text_color(sign_name_color[0], 0)
+    matrixportal.set_text(centered_name, 0)
+    safe_delay(name_secs)
+    w.feed()
+
+    # Normalise messages to a list
+    raw_messages = match["msg"]
+    if isinstance(raw_messages, str):
+        raw_messages = [raw_messages]
+    elif not isinstance(raw_messages, list):
+        raw_messages = [str(raw_messages)]
+
+    # Display each message, paginated
+    matrixportal.set_text_color(sign_text_color[0], 0)
+    for raw_msg in raw_messages:
+        clean_msg = clean_string(raw_msg)
+        pages = paginate_message(clean_msg, lines_per_page)
+        for page in pages:
+            centered_page = center_multiline_string(page, characters_per_line)
+            print(f"Page:\n{centered_page}")
+            matrixportal.set_text(centered_page, 0)
+            safe_delay(page_secs)
+            w.feed()
 
 def ensure_dir_exists(filepath):
     """Creates all parent directories for filepath using single-level os.mkdir()."""
@@ -597,10 +655,14 @@ def poll_server():
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
-    polling the web server so the log page stays responsive."""
+    polling the web server so the log page stays responsive.
+    Exits early if _reboot_pending is set so reboots happen within seconds
+    rather than waiting for the current display cycle to finish."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
         poll_server()  # includes w.feed() before and after
+        if _reboot_pending[0]:
+            return  # Exit early — main loop will handle the reboot
         time.sleep(0.01)
 
 # --- WiFi Connection ---
@@ -1021,6 +1083,7 @@ if HAS_HTTPSERVER and pool is not None:
             cur_name_color = settings.get("sign_name_color",  "#0000FF")
             n_h, n_m, n_s = secs_to_hms(int(settings.get("name_display_seconds", 3)))
             m_h, m_m, m_s = secs_to_hms(int(settings.get("msg_display_seconds", 10)))
+            p_h, p_m, p_s = secs_to_hms(int(settings.get("page_display_seconds", 5)))
             c_h, c_m, c_s = secs_to_hms(int(settings.get("cycle_sleep_seconds", 30)))
 
             order_opts = ""
@@ -1074,8 +1137,9 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"row\"><label>Name display:</label>" +
                 hms_inputs("name", n_h, n_m, n_s) + "</div>"
 
-                "<div class=\"row\"><label>Message display:</label>" +
-                hms_inputs("msg", m_h, m_m, m_s) + "</div>"
+                "<div class=\"row\"><label>Page display:</label>" +
+                hms_inputs("page", p_h, p_m, p_s) +
+                "<small style=\"color:#888\"> &mdash; time per page for long/multi messages</small></div>"
 
                 "<div class=\"row\"><label>Cycle interval:</label>" +
                 hms_inputs("cycle", c_h, c_m, c_s) + "</div>"
@@ -1126,6 +1190,9 @@ if HAS_HTTPSERVER and pool is not None:
                     p.get("name_h", cur_n_h), p.get("name_m", cur_n_m), p.get("name_s", cur_n_s))
                 new_msg_secs   = hms_to_secs(
                     p.get("msg_h", cur_m_h),  p.get("msg_m", cur_m_m),  p.get("msg_s", cur_m_s))
+                cur_p_h, cur_p_m, cur_p_s = secs_to_hms(page_disp_secs)
+                new_page_secs  = hms_to_secs(
+                    p.get("page_h", cur_p_h), p.get("page_m", cur_p_m), p.get("page_s", cur_p_s))
                 new_cycle_secs = hms_to_secs(
                     p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
@@ -1134,6 +1201,7 @@ if HAS_HTTPSERVER and pool is not None:
                 settings["sign_name_color"]        = new_name_color
                 settings["name_display_seconds"]  = new_name_secs
                 settings["msg_display_seconds"]   = new_msg_secs
+                settings["page_display_seconds"]  = new_page_secs
                 settings["cycle_sleep_seconds"]   = new_cycle_secs
 
                 ok = save_settings(settings)
@@ -1141,6 +1209,7 @@ if HAS_HTTPSERVER and pool is not None:
                 # Apply non-color-order changes immediately (no reboot needed)
                 name_disp_secs   = new_name_secs
                 msg_disp_secs    = new_msg_secs
+                page_disp_secs   = new_page_secs
                 cycle_sleep_secs = new_cycle_secs
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
@@ -1791,23 +1860,7 @@ while True:
                 for match in matched_signs:
                     w.feed()
                     print(f"\nMATCH: {match['name']}")
-
-                    # Display sign name in blue
-                    centered_name = center_multiline_string(
-                        clean_string(match["name"]), characters_per_line)
-                    print(f"Name display:\n{centered_name}")
-                    matrixportal.set_text_color(sign_name_color[0], 0)
-                    matrixportal.set_text(centered_name, 0)
-                    safe_delay(name_disp_secs)
-
-                    # Display sign message in road-sign yellow
-                    centered_msg = center_multiline_string(
-                        clean_string(match["msg"]).replace("\\n", "\n"),
-                        characters_per_line)
-                    print(f"Message display:\n{centered_msg}")
-                    matrixportal.set_text_color(sign_text_color[0], 0)
-                    matrixportal.set_text(centered_msg, 0)
-                    safe_delay(msg_disp_secs)
+                    display_sign(match, name_disp_secs, page_disp_secs)
             else:
                 print(f"Unexpected API response type: {type(json_data)}")
         else:
