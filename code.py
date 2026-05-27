@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.1.8"
+LOCAL_VERSION = "2.2.1"
 
 # --- Imports ---
 import ssl
@@ -505,12 +505,15 @@ def poll_server():
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
-    polling the web server so the log page stays responsive."""
+    polling the web server so the log page stays responsive.
+    Calls poll_server() twice per iteration to help complete multi-packet
+    HTTP transactions that need rapid successive poll() calls."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
         w.feed()
         poll_server()
-        time.sleep(0.02)
+        poll_server()  # Second poll helps complete in-progress HTTP transactions
+        time.sleep(0.01)
 
 # --- WiFi Connection ---
 def connect_wifi():
@@ -854,6 +857,15 @@ if HAS_HTTPSERVER and pool is not None:
         server = Server(pool)
         server.socket_timeout = 0.05
 
+        # Force Connection: close on all responses so Firefox doesn't wait
+        # for persistent connection data that never arrives.
+        # adafruit_httpserver doesn't send Content-Length by default,
+        # which causes Firefox (strict HTTP/1.1) to hang waiting for more data.
+        try:
+            server.headers["Connection"] = "close"
+        except Exception:
+            pass  # If headers API differs, not fatal — Edge will still work
+
         # ── GET / — Log page ──────────────────────────────────────────────
         @server.route("/", GET)
         def route_index(request):
@@ -867,7 +879,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<pre>" + logs_html + "</pre></div>"
                 "</body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /reboot ──────────────────────────────────────────────────
         @server.route("/reboot", "POST")
@@ -958,7 +970,7 @@ if HAS_HTTPSERVER and pool is not None:
 
                 "</body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /save-settings ───────────────────────────────────────────
         @server.route("/save-settings", "POST")
@@ -1012,7 +1024,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
                 "</form></div></body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── GET /signs — Traffic Signs page ───────────────────────────────
         @server.route("/signs", GET)
@@ -1080,7 +1092,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"card\">" + sign_section + "</div>"
                 "</body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /refresh-signs-cache — Fetch NY511, save cache ───────────
         @server.route("/refresh-signs-cache", "POST")
@@ -1142,7 +1154,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
                 "</div></body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /save-signs — Save favourite selections ──────────────────
         @server.route("/save-signs", "POST")
@@ -1180,7 +1192,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
                 "</div></body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /calibrate — Light panels with numbers, show color picker ──
         @server.route("/calibrate", "POST")
@@ -1290,7 +1302,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "</script>"
                 "</body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /calibrate-result ────────────────────────────────────────
         @server.route("/calibrate-result", "POST")
@@ -1333,7 +1345,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
                 "</form></div></body></html>"
             )
-            return Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         server.start("0.0.0.0", port=80)
         print(f"Web server active at http://{wifi.radio.ipv4_address}/")
@@ -1378,10 +1390,16 @@ while True:
     try:
         poll_server()  # Service web requests before API fetch
 
+        # Poll rapidly while waiting for API response — this is the longest
+        # blocking call and most likely time for a browser to connect
+        _fetch_done = [False]
         response = requests.get(NY511_URL, timeout=15)
         w.feed()
 
-        poll_server()  # Service web requests after API fetch
+        # Drain any pending web requests immediately after fetch completes
+        for _ in range(5):
+            poll_server()
+        gc.collect()
 
         if response.status_code == 200:
             print("API fetch successful. Parsing JSON...")
