@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.15"
+LOCAL_VERSION = "2.2.16"
 
 # --- Imports ---
 import ssl
@@ -276,7 +276,7 @@ print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_co
       + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
       + "s cycle=" + str(cycle_sleep_secs) + "s")
 
-# --- signs.json — favourite sign names (replaces sign_list.txt) ---
+# --- signs.json — favorite sign names (replaces sign_list.txt) ---
 SIGNS_FILE       = "signs.json"
 SIGNS_CACHE_FILE = "signs_cache.json"
 
@@ -340,8 +340,8 @@ def refresh_signs_cache_from_api():
         matrixportal.set_text("", 0)
         gc.collect()
 
-def load_favourite_signs():
-    """Load the list of favourite sign names from signs.json."""
+def load_favorite_signs():
+    """Load the list of favorite sign names from signs.json."""
     try:
         with open(SIGNS_FILE, "r") as f:
             data = json.loads(f.read())
@@ -349,8 +349,8 @@ def load_favourite_signs():
     except Exception:
         return []
 
-def save_favourite_signs(favorites_list):
-    """Save the list of favourite sign names to signs.json atomically."""
+def save_favorite_signs(favorites_list):
+    """Save the list of favorite sign names to signs.json atomically."""
     tmp = SIGNS_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
@@ -362,7 +362,7 @@ def save_favourite_signs(favorites_list):
         os.rename(tmp, SIGNS_FILE)
         return True
     except Exception as e:
-        print(f"save_favourite_signs failed: {e}")
+        print(f"save_favorite_signs failed: {e}")
         return False
 
 def load_signs_cache():
@@ -1245,7 +1245,7 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/signs", GET)
         def route_signs(request):
             cached = load_signs_cache()
-            favs   = set(load_favourite_signs())
+            favs   = set(load_favorite_signs())
             cache_count = len(cached)
             w.feed()
 
@@ -1276,7 +1276,7 @@ if HAS_HTTPSERVER and pool is not None:
 
                 sign_section = (
                     "<p style=\"color:#aaa\">" + str(cache_count) +
-                    " signs cached. Favourites shown in "
+                    " signs cached. Favorites shown in "
                     "<span style=\"color:#F7B500\">yellow</span>.</p>"
                     "<input type=\"text\" id=\"sign-filter\" placeholder=\"Filter signs...\" "
                     "oninput=\"filterSigns(this.value)\" style=\"width:100%;max-width:500px;"
@@ -1284,7 +1284,7 @@ if HAS_HTTPSERVER and pool is not None:
                     "border:1px solid #555;border-radius:4px;font-family:monospace;\">"
                     "<form method=\"POST\" action=\"/save-signs\">"
                     "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
-                    "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favourites</button>"
+                    "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favorites</button>"
                     "</form>"
                     "<script>"
                     "function filterSigns(q){"
@@ -1339,7 +1339,7 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── POST /save-signs — Save favourite selections ──────────────────
+        # ── POST /save-signs — Save favorite selections ──────────────────
         @server.route("/save-signs", "POST")
         def route_save_signs(request):
             global favsign_list
@@ -1348,20 +1348,26 @@ if HAS_HTTPSERVER and pool is not None:
                 selected = []
                 for part in body_str.split("&"):
                     if part.startswith("fav="):
-                        # URL-decode the sign name (replace + with space, %XX)
                         name = part[4:]
                         name = name.replace("+", " ")
-                        # Basic percent-decode for common chars
-                        for code, char in [("%2C",","),("%28","("),("%29",")")
-                                           ,("%2F","/"),("%3A",":")]:
-                            name = name.replace(code, char)
+                        # Full percent-decode covering all chars used in sign names
+                        pct_map = [
+                            ("%2C",","),("%28","("),("%29",")"),("%2F","/"),
+                            ("%3A",":"),("%5B","["),("%5D","]"),("%2D","-"),
+                            ("%2E","."),("%27","'"),("%21","!"),("%40","@"),
+                            ("%23","#"),("%24","$"),("%26","&"),("%3D","="),
+                            ("%3F","?"),("%20"," "),("%25","%"),
+                        ]
+                        for code, char in pct_map:
+                            name = name.replace(code, char).replace(
+                                code.lower(), char)
                         if name:
                             selected.append(name)
-                ok = save_favourite_signs(selected)
+                ok = save_favorite_signs(selected)
                 favsign_list = selected  # Update live list immediately
-                status = "Saved " + str(len(selected)) + " favourite sign(s)."
+                status = "Saved " + str(len(selected)) + " favorite sign(s)."
                 cls = "status-ok" if ok else "status-err"
-                print(f"Favourites saved: {len(selected)} signs ok={ok}")
+                print(f"Favorites saved: {len(selected)} signs ok={ok}")
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
@@ -1631,7 +1637,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<label style=\"min-width:0\">"
                 "<input type=\"checkbox\" name=\"sync_signs\" value=\"1\" checked> "
                 "Sync <strong>signs.json</strong> "
-                "<span style=\"color:#888\">(favourite sign list)</span>"
+                "<span style=\"color:#888\">(favorite sign list)</span>"
                 "</label>"
                 "</div><br>"
                 "<button class=\"btn-cyan\" type=\"submit\">&#x1F4E1; Sync Now</button>"
@@ -1701,12 +1707,12 @@ if HAS_HTTPSERVER and pool is not None:
                         cls = "status-err"
 
                 if do_signs and "signs" in bundle:
-                    ok = save_favourite_signs(bundle["signs"].get("favorites", []))
+                    ok = save_favorite_signs(bundle["signs"].get("favorites", []))
                     if ok:
                         favsign_list.clear()
                         favsign_list.extend(bundle["signs"].get("favorites", []))
                         status_lines.append("&#x2713; signs.json synced ("
-                                           + str(len(favsign_list)) + " favourites)")
+                                           + str(len(favsign_list)) + " favorites)")
                     else:
                         status_lines.append("&#x2717; signs.json save failed")
                         cls = "status-err"
@@ -1751,12 +1757,12 @@ if HAS_HTTPSERVER and pool is not None:
         log_exception(e)
         HAS_HTTPSERVER = False
 
-# --- Load Favourite Signs List ---
-favsign_list = load_favourite_signs()
+# --- Load Favorite Signs List ---
+favsign_list = load_favorite_signs()
 if favsign_list:
-    print(f"Loaded {len(favsign_list)} favourite sign(s) from signs.json.")
+    print(f"Loaded {len(favsign_list)} favorite sign(s) from signs.json.")
 else:
-    print("No favourite signs loaded (signs.json missing or empty).")
+    print("No favorite signs loaded (signs.json missing or empty).")
     print("Visit the Traffic Signs tab on the web UI to select signs.")
 
 # --- Main Loop ---
@@ -1841,7 +1847,7 @@ while True:
             if isinstance(json_data, list):
                 sign_count = len(json_data)
                 print(f"Loaded {sign_count} signs from API.")
-                print("Extracting favourites...")
+                print("Extracting favorites...")
 
                 # Extract only matching signs into a small list, then free the full dataset
                 fav_set = set(favsign_list)
