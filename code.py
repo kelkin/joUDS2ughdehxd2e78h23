@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.17"
+LOCAL_VERSION = "2.2.18"
 
 # --- Imports ---
 import ssl
@@ -1019,6 +1019,16 @@ def parse_post_body(request):
         print(f"parse_post_body error: {e}")
     return params
 
+def _parse_color_field(post_params, key, fallback):
+    """Extract and validate a hex color value from POST params.
+    Handles %23-encoded # and missing # prefix. Falls back to
+    current settings value or the provided fallback if invalid."""
+    v = post_params.get(key, settings.get(key, fallback))
+    v = v.replace("%23", "#")
+    if not v.startswith("#"):
+        v = "#" + v
+    return v if len(v) == 7 else settings.get(key, fallback)
+
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
@@ -1192,15 +1202,8 @@ if HAS_HTTPSERVER and pool is not None:
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
 
-                def parse_color(key, fallback):
-                    v = p.get(key, settings.get(key, fallback))
-                    v = v.replace("%23", "#")
-                    if not v.startswith("#"):
-                        v = "#" + v
-                    return v if len(v) == 7 else settings.get(key, fallback)
-
-                new_color      = parse_color("sign_text_color", "#F7B500")
-                new_name_color = parse_color("sign_name_color",  "#0000FF")
+                new_color      = _parse_color_field(p, "sign_text_color", "#F7B500")
+                new_name_color = _parse_color_field(p, "sign_name_color",  "#0000FF")
 
                 # Use current values as defaults so missing fields don't reset to 0
                 cur_n_h, cur_n_m, cur_n_s = secs_to_hms(name_disp_secs)
@@ -1941,4 +1944,3 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
-
