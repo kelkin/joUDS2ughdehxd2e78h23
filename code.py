@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.1"
+LOCAL_VERSION = "2.2.2"
 
 # --- Imports ---
 import ssl
@@ -908,7 +908,7 @@ def parse_post_body(request):
     return params
 
 _calib_state = {"active": False}
-_refresh_cache_pending = False  # Set by web UI, consumed by main loop
+_refresh_cache_pending = [False]  # Mutable container — works across closure scopes
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
@@ -1158,8 +1158,7 @@ if HAS_HTTPSERVER and pool is not None:
         # The actual fetch is done by the main loop on the next cycle.
         @server.route("/refresh-signs-cache", "POST")
         def route_refresh_cache(request):
-            global _refresh_cache_pending
-            _refresh_cache_pending = True
+            _refresh_cache_pending[0] = True
             print("NY511 cache refresh queued — will run on next main loop cycle.")
             body = (
                 html_head("Refreshing Signs...") +
@@ -1393,8 +1392,8 @@ while True:
     gc.collect()
 
     # Handle pending sign cache refresh (queued by web UI)
-    if _refresh_cache_pending:
-        _refresh_cache_pending = False
+    if _refresh_cache_pending[0]:
+        _refresh_cache_pending[0] = False
         if wifi.radio.connected and requests is not None:
             refresh_signs_cache_from_api()
         else:
