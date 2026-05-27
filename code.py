@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "1.1.9"
+LOCAL_VERSION = "2.0.0"
 
 # --- Imports ---
 import ssl
@@ -179,6 +179,43 @@ matrix_debug        = bool(secrets.get("matrix_debug", False))
 characters_per_line = int(secrets.get("characters_per_line", 10))
 sign_text_color     = secrets.get("sign_text_color", 0xF7B500)  # Road sign yellow
 
+# --- Load settings.json (user-configurable, survives OTA) ---
+SETTINGS_FILE = "settings.json"
+_default_settings = {"color_order": secrets.get("color_order", "RGB")}
+
+def load_settings():
+    """Load settings.json, returning defaults for any missing keys."""
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            data = json.loads(f.read())
+        # Merge with defaults so new keys always exist
+        for k, v in _default_settings.items():
+            if k not in data:
+                data[k] = v
+        return data
+    except Exception:
+        return dict(_default_settings)
+
+def save_settings(data):
+    """Write settings dict to settings.json atomically via .tmp swap."""
+    tmp = SETTINGS_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps(data))
+        try:
+            os.remove(SETTINGS_FILE)
+        except OSError:
+            pass
+        os.rename(tmp, SETTINGS_FILE)
+        return True
+    except Exception as e:
+        print(f"save_settings failed: {e}")
+        return False
+
+settings = load_settings()
+color_order = settings.get("color_order", "RGB")
+print(f"Settings loaded. color_order={color_order}")
+
 # --- Hardware Watchdog ---
 w.timeout = 45.0
 w.mode = WatchDogMode.RESET
@@ -190,7 +227,8 @@ matrixportal = MatrixPortal(
     width=width,
     height=height,
     bit_depth=bit_depth,
-    debug=matrix_debug
+    debug=matrix_debug,
+    color_order=color_order
 )
 matrixportal.add_text(
     text_font=terminalio.FONT,
@@ -631,43 +669,297 @@ def perform_ota_check(requests_session, force=False):
 # Run OTA check at startup
 perform_ota_check(requests, force=False)
 
+# --- Shared HTML page helpers ---
+VALID_COLOR_ORDERS = ["RGB", "RBG", "GRB", "GBR", "BRG", "BGR"]
+
+def html_head(title):
+    return (
+        "<!DOCTYPE html><html><head>"
+        "<title>" + title + "</title>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<style>"
+        "body{font-family:monospace;background:#111;color:#eee;margin:0;padding:20px;}"
+        "h1{color:#ff3333;margin-top:0;}h2{color:#ffaa00;}"
+        "nav{background:#1a1a1a;padding:10px 20px;margin:-20px -20px 20px -20px;"
+        "border-bottom:1px solid #333;}"
+        "nav a{color:#00ccff;text-decoration:none;margin-right:20px;font-size:1.1em;}"
+        "nav a:hover{color:#fff;}"
+        "nav a.active{color:#fff;border-bottom:2px solid #ff3333;padding-bottom:2px;}"
+        ".meta{color:#888;font-size:0.85em;margin-bottom:15px;}"
+        ".card{background:#1a1a1a;border:1px solid #333;border-radius:6px;"
+        "padding:15px;margin-bottom:15px;}"
+        "pre{background:#000;padding:15px;border-radius:5px;color:#00ff00;"
+        "white-space:pre-wrap;overflow-x:auto;margin:0;}"
+        "button{font-family:monospace;font-size:1em;padding:8px 18px;"
+        "border:none;border-radius:4px;cursor:pointer;margin:4px;}"
+        "select{font-family:monospace;font-size:1em;padding:6px 10px;"
+        "background:#222;color:#eee;border:1px solid #555;border-radius:4px;}"
+        "label{display:block;margin-bottom:6px;color:#aaa;}"
+        ".btn-red{background:#cc2222;color:#fff;}.btn-red:hover{background:#ff3333;}"
+        ".btn-green{background:#226622;color:#fff;}.btn-green:hover{background:#33aa33;}"
+        ".btn-blue{background:#224499;color:#fff;}.btn-blue:hover{background:#3366cc;}"
+        ".btn-yellow{background:#886600;color:#fff;}.btn-yellow:hover{background:#bbaa00;}"
+        ".btn-gray{background:#444;color:#fff;}.btn-gray:hover{background:#666;}"
+        ".status-ok{color:#33ff33;}.status-err{color:#ff3333;}"
+        "table.calib{border-collapse:collapse;width:100%;margin-top:10px;}"
+        "table.calib td{padding:10px;text-align:center;border:1px solid #333;vertical-align:top;width:33%;}"
+        "table.calib .swatch{width:60px;height:60px;border-radius:6px;margin:0 auto 10px auto;}"
+        "table.calib .color-btn{display:block;width:100%;margin:3px 0;}"
+        "</style></head>"
+    )
+
+def html_nav(active):
+    log_cls = " class=\"active\"" if active == "log" else ""
+    set_cls = " class=\"active\"" if active == "settings" else ""
+    return (
+        "<nav>"
+        "<a href=\"/\"" + log_cls + ">&#x1F4CB; Log</a>"
+        "<a href=\"/settings\"" + set_cls + ">&#x2699;&#xFE0F; Settings</a>"
+        "</nav>"
+    )
+
+def html_meta():
+    return (
+        "<div class=\"meta\">Firmware: v" + LOCAL_VERSION +
+        " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
+        " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
+    )
+
+_calib_state = {"active": False}
+
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
     try:
         server = Server(pool)
-        # Set a very short socket timeout so poll() returns immediately
-        # when no browser is connected, keeping the main loop non-blocking.
-        # Without this, poll() blocks for the default timeout on every call.
         server.socket_timeout = 0.05
 
+        # ── GET / — Log page ──────────────────────────────────────────────
         @server.route("/", GET)
         def route_index(request):
             logs_html = web_logger.get_logs().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             body = (
-                "<!DOCTYPE html><html><head><title>Matrix Portal S3</title>"
-                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-                "<style>"
-                "body{font-family:monospace;background:#111;color:#ff3333;margin:20px;}"
-                "pre{background:#000;padding:15px;border-radius:5px;color:#00ff00;"
-                "white-space:pre-wrap;overflow-x:auto;}"
-                ".meta{color:#888;font-size:0.85em;margin-bottom:10px;}"
-                "</style></head>"
-                "<body><h1>&#x1F6A8; Matrix Portal S3</h1>"
-                "<div class=\"meta\">Firmware: v" + LOCAL_VERSION +
-                " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
-                " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
-                "<h2>Log Output:</h2><pre>" + logs_html + "</pre>"
+                html_head("Matrix Portal S3 - Log") +
+                "<body>" + html_nav("log") +
+                "<h1>&#x1F6A8; Matrix Portal S3</h1>" + html_meta() +
+                "<div class=\"card\"><h2>Log Output:</h2>"
+                "<pre>" + logs_html + "</pre></div>"
                 "</body></html>"
             )
             return Response(request, content_type="text/html", body=body)
 
-        # Bind to "0.0.0.0" (all interfaces) rather than the specific IP string.
-        # The new adafruit_httpserver validates the IP via DNS lookup and rejects
-        # the ipv4_address object's string representation on some builds.
+        # ── POST /reboot ──────────────────────────────────────────────────
+        @server.route("/reboot", "POST")
+        def route_reboot(request):
+            print("Reboot requested via web UI.")
+            body = (
+                html_head("Rebooting...") +
+                "<body>" + html_nav("log") +
+                "<h1>&#x1F6A8; Rebooting...</h1>"
+                "<p>The board is rebooting. Reconnecting in 8 seconds...</p>"
+                "<script>setTimeout(function(){window.location='/'},8000);</script>"
+                "</body></html>"
+            )
+            resp = Response(request, content_type="text/html", body=body)
+            import supervisor
+            supervisor.reload()
+            return resp
+
+        # ── GET /settings ─────────────────────────────────────────────────
+        @server.route("/settings", GET)
+        def route_settings(request):
+            current = settings.get("color_order", "RGB")
+            opts = ""
+            for o in VALID_COLOR_ORDERS:
+                sel = " selected" if o == current else ""
+                opts += "<option value=\"" + o + "\"" + sel + ">" + o + "</option>"
+            body = (
+                html_head("Matrix Portal S3 - Settings") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                "<div class=\"card\"><h2>System</h2>"
+                "<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Board</button>"
+                "</form></div>"
+                "<div class=\"card\"><h2>Display Color Order</h2>"
+                "<p style=\"color:#aaa\">Current: <strong style=\"color:#fff\">" + current + "</strong>"
+                " &mdash; Change takes effect after reboot.</p>"
+                "<form method=\"POST\" action=\"/save-settings\">"
+                "<label for=\"co\">Color Order:</label>"
+                "<select name=\"color_order\" id=\"co\">" + opts + "</select>"
+                "&nbsp;<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save</button>"
+                "</form></div>"
+                "<div class=\"card\"><h2>&#x1F3A8; RGB Order Calibration Wizard</h2>"
+                "<p style=\"color:#aaa\">Illuminates each panel a different primary color "
+                "at 20% brightness so you can identify the correct order for your hardware.</p>"
+                "<form method=\"POST\" action=\"/calibrate\">"
+                "<button class=\"btn-yellow\" type=\"submit\">&#x25B6; Start Calibration</button>"
+                "</form></div>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
+        # ── POST /save-settings ───────────────────────────────────────────
+        @server.route("/save-settings", "POST")
+        def route_save_settings(request):
+            try:
+                body_str = request.body.decode("utf-8") if request.body else ""
+                new_order = "RGB"
+                for part in body_str.split("&"):
+                    if part.startswith("color_order="):
+                        new_order = part.split("=", 1)[1].strip().upper()
+                        break
+                if new_order not in VALID_COLOR_ORDERS:
+                    new_order = "RGB"
+                settings["color_order"] = new_order
+                ok = save_settings(settings)
+                status = "Saved! Reboot to apply." if ok else "Save failed."
+                cls = "status-ok" if ok else "status-err"
+                print(f"color_order saved: {new_order} ok={ok}")
+            except Exception as e:
+                status = "Error: " + str(e)
+                cls = "status-err"
+                log_exception(e)
+            body = (
+                html_head("Settings Saved") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
+                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
+                "</form></div>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
+        # ── POST /calibrate — Light panels, show color picker ─────────────
+        @server.route("/calibrate", "POST")
+        def route_calibrate(request):
+            global _calib_state
+            _calib_state["active"] = True
+            try:
+                import displayio
+                display = matrixportal.display
+                bmp = displayio.Bitmap(width, height, 3)
+                pal = displayio.Palette(3)
+                pal[0] = 0x330000  # dim red   — left panel
+                pal[1] = 0x003300  # dim green — mid panel
+                pal[2] = 0x000033  # dim blue  — right panel
+                panel_w = width // 3
+                for y in range(height):
+                    for x in range(width):
+                        bmp[x, y] = 0 if x < panel_w else (1 if x < panel_w * 2 else 2)
+                tg = displayio.TileGrid(bmp, pixel_shader=pal)
+                splash = displayio.Group()
+                splash.append(tg)
+                display.root_group = splash
+                w.feed()
+            except Exception as disp_err:
+                print(f"Calibration display error: {disp_err}")
+                log_exception(disp_err)
+
+            rows = ""
+            panels = [("Left","R","330000"),("Middle","G","003300"),("Right","B","000033")]
+            for name, sent, swatch in panels:
+                btns = ""
+                for c, lbl, cls in [("R","Red","btn-red"),("G","Green","btn-green"),("B","Blue","btn-blue")]:
+                    btns += (
+                        "<button class=\"" + cls + " color-btn\" type=\"button\" "
+                        "onclick=\"pick('" + name + "','" + c + "',this)\">" + lbl + "</button>"
+                    )
+                rows += (
+                    "<td><div class=\"swatch\" style=\"background:#" + swatch + "\"></div>"
+                    "<strong>" + name + " Panel</strong><br>"
+                    "<small style=\"color:#888\">Sent: " + sent + "</small><br><br>"
+                    + btns +
+                    "<div id=\"sel_" + name + "\" style=\"margin-top:6px;color:#ffaa00;\"></div></td>"
+                )
+
+            body = (
+                html_head("RGB Calibration") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Look at your display. Each third should be lit a dim color. "
+                "Click the color you <strong>actually see</strong> for each panel.</p>"
+                "<form method=\"POST\" action=\"/calibrate-result\" id=\"calform\">"
+                "<input type=\"hidden\" name=\"left\" id=\"v_Left\">"
+                "<input type=\"hidden\" name=\"mid\" id=\"v_Middle\">"
+                "<input type=\"hidden\" name=\"right\" id=\"v_Right\">"
+                "<table class=\"calib\"><tr>" + rows + "</tr></table><br>"
+                "<button class=\"btn-green\" type=\"submit\" id=\"applybtn\" disabled "
+                "style=\"font-size:1.1em;padding:10px 30px;\">&#x2713; Apply Color Order</button>"
+                "<a href=\"/settings\"><button class=\"btn-gray\" type=\"button\" "
+                "style=\"margin-left:10px;\">Cancel</button></a>"
+                "</form></div>"
+                "<script>"
+                "var picks={};"
+                "function pick(panel,color,btn){"
+                "picks[panel]=color;"
+                "document.getElementById('v_'+panel).value=color;"
+                "var cell=btn.parentNode;"
+                "var btns=cell.querySelectorAll('button');"
+                "for(var i=0;i<btns.length;i++){btns[i].style.opacity='0.4';}"
+                "btn.style.opacity='1';btn.style.outline='2px solid #fff';"
+                "document.getElementById('sel_'+panel).textContent='Selected: '+color;"
+                "if(picks['Left']&&picks['Middle']&&picks['Right']){"
+                "document.getElementById('applybtn').disabled=false;}}"
+                "</script>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
+        # ── POST /calibrate-result — Derive and save color order ──────────
+        @server.route("/calibrate-result", "POST")
+        def route_calibrate_result(request):
+            global _calib_state
+            _calib_state["active"] = False
+            try:
+                matrixportal.display.root_group = matrixportal.splash
+            except Exception:
+                pass
+            try:
+                body_str = request.body.decode("utf-8") if request.body else ""
+                params = {}
+                for part in body_str.split("&"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        params[k.strip()] = v.strip().upper()
+                left  = params.get("left",  "R")
+                mid   = params.get("mid",   "G")
+                right = params.get("right", "B")
+                # Board sent Left=R, Mid=G, Right=B.
+                # User reports what they see — that IS the color_order string.
+                order_str = left + mid + right
+                if order_str not in VALID_COLOR_ORDERS:
+                    raise ValueError("Invalid order: " + order_str)
+                settings["color_order"] = order_str
+                ok = save_settings(settings)
+                print(f"Calibration: L={left} M={mid} R={right} -> {order_str} saved={ok}")
+                status = "Color order set to <strong>" + order_str + "</strong>. " + ("Saved! Reboot to apply." if ok else "Save failed.")
+                cls = "status-ok" if ok else "status-err"
+            except Exception as e:
+                status = "Calibration error: " + str(e)
+                cls = "status-err"
+                log_exception(e)
+            body = (
+                html_head("Calibration Complete") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x1F3A8; Calibration Complete</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
+                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
+                "</form></div>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
         server.start("0.0.0.0", port=80)
         print(f"Web server active at http://{wifi.radio.ipv4_address}/")
     except Exception as e:
         print(f"Web server start failed: {e}")
+        log_exception(e)
         HAS_HTTPSERVER = False
 
 # --- Load Preferred Sign List ---
@@ -794,3 +1086,4 @@ while True:
 
     print("Cycle complete. Waiting 30s...")
     safe_delay(30)
+
