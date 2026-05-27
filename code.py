@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.16"
+LOCAL_VERSION = "2.2.17"
 
 # --- Imports ---
 import ssl
@@ -305,19 +305,25 @@ def refresh_signs_cache_from_api():
             print("NY511 cache: unexpected response format")
             return False
 
-        sign_names = []
+        sign_data = []
         for sign in api_data:
             w.feed()  # Feed watchdog while iterating 933 signs
             if "Name" in sign:
-                sign_names.append(sign["Name"])
+                # Store name + messages (drop lat/long/roadway to save space)
+                msgs = sign.get("Messages", [])
+                if isinstance(msgs, str):
+                    msgs = [msgs]
+                elif not isinstance(msgs, list):
+                    msgs = []
+                sign_data.append({"name": sign["Name"], "messages": msgs})
 
-        sign_names.sort()
+        sign_data.sort(key=lambda s: s["name"])
         api_data = None
         gc.collect()
         gc.collect()
 
-        ok = save_signs_cache(sign_names)
-        print(f"NY511 cache: {len(sign_names)} signs saved={ok}")
+        ok = save_signs_cache(sign_data)
+        print(f"NY511 cache: {len(sign_data)} signs saved={ok}")
 
         matrixportal.set_text_color(0x00FF00, 0)
         matrixportal.set_text(center_multiline_string(
@@ -366,20 +372,27 @@ def save_favorite_signs(favorites_list):
         return False
 
 def load_signs_cache():
-    """Load cached sign names from signs_cache.json. Returns [] on any error."""
+    """Load sign cache from signs_cache.json.
+    Returns list of {"name": str, "messages": list} dicts.
+    Handles old format (list of strings) by converting transparently."""
     try:
         with open(SIGNS_CACHE_FILE, "r") as f:
             data = json.loads(f.read())
-        return data.get("signs", [])
+        signs = data.get("signs", [])
+        # Handle old format: list of plain strings
+        if signs and isinstance(signs[0], str):
+            return [{"name": s, "messages": []} for s in signs]
+        return signs
     except Exception:
         return []
 
-def save_signs_cache(sign_names):
-    """Save a list of sign name strings to signs_cache.json atomically."""
+def save_signs_cache(sign_data):
+    """Save sign data to signs_cache.json atomically.
+    sign_data: list of {"name": str, "messages": list} dicts."""
     tmp = SIGNS_CACHE_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
-            f.write(json.dumps({"signs": sign_names}))
+            f.write(json.dumps({"signs": sign_data}))
         try:
             os.remove(SIGNS_CACHE_FILE)
         except OSError:
@@ -1072,6 +1085,11 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/reboot", "POST")
         def route_reboot(request):
             print("Reboot requested via web UI.")
+            try:
+                matrixportal.set_text_color(0xFF8800, 0)  # Amber
+                matrixportal.set_text(center_multiline_string("REBOOT\nPENDING", characters_per_line), 0)
+            except Exception:
+                pass
             _reboot_pending[0] = True
             return Response(request,
                           status=(303, "See Other"),
@@ -1244,62 +1262,95 @@ if HAS_HTTPSERVER and pool is not None:
         # ── GET /signs — Traffic Signs page ───────────────────────────────
         @server.route("/signs", GET)
         def route_signs(request):
-            cached = load_signs_cache()
+            cached = load_signs_cache()  # list of {"name":str, "messages":[...]}
             favs   = set(load_favorite_signs())
             cache_count = len(cached)
             w.feed()
 
             if cached:
-                # Build checkbox list in chunks of 50, feeding watchdog between chunks
-                fav_items   = sorted([s for s in cached if s in favs])
-                other_items = sorted([s for s in cached if s not in favs])
+                fav_items   = sorted([s for s in cached if s["name"] in favs],
+                                     key=lambda s: s["name"])
+                other_items = sorted([s for s in cached if s["name"] not in favs],
+                                     key=lambda s: s["name"])
                 all_items   = fav_items + other_items
                 w.feed()
 
                 items_parts = []
-                for i, name in enumerate(all_items):
+                msg_parts   = ["var MSGS={"]
+                for i, sign in enumerate(all_items):
                     if i % 50 == 0:
-                        w.feed()  # Feed watchdog every 50 items
-                    checked = " checked" if name in favs else ""
-                    fav_cls = " fav" if name in favs else ""
+                        w.feed()
+                    name     = sign["name"]
+                    messages = sign.get("messages", [])
+                    checked  = " checked" if name in favs else ""
+                    fav_cls  = " fav" if name in favs else ""
                     safe_name = (name.replace("&","&amp;").replace("<","&lt;")
                                      .replace(">","&gt;").replace("\"","&quot;"))
+                    js_safe  = name.replace("\\","\\\\").replace("'","\\'")
                     items_parts.append(
-                        "<div class=\"sign-item" + fav_cls + "\">"
+                        "<div class=\"sign-item" + fav_cls + "\" "
+                        "onmouseenter=\"showPreview('" + js_safe + "')\" "
+                        "onmouseleave=\"hidePreview()\">"
                         "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
                         safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
                     )
+                    if messages:
+                        preview = " / ".join(
+                            str(m).replace("\n"," | ").replace("'","\\'")
+                            for m in messages if m)
+                    else:
+                        preview = "NO MESSAGE"
+                    msg_parts.append("'" + js_safe + "':'" + preview + "',")
+
                 items_html = "".join(items_parts)
+                msg_js     = "".join(msg_parts) + "}"
                 items_parts = None
+                msg_parts   = None
                 w.feed()
                 gc.collect()
 
                 sign_section = (
                     "<p style=\"color:#aaa\">" + str(cache_count) +
-                    " signs cached. Favorites shown in "
-                    "<span style=\"color:#F7B500\">yellow</span>.</p>"
+                    " signs cached. Favorites in <span style=\"color:#F7B500\">yellow</span>. "
+                    "Hover a sign to preview messages.</p>"
+                    "<div style=\"display:flex;gap:12px;align-items:flex-start\">"
+                    "<div style=\"flex:1;min-width:0\">"
                     "<input type=\"text\" id=\"sign-filter\" placeholder=\"Filter signs...\" "
-                    "oninput=\"filterSigns(this.value)\" style=\"width:100%;max-width:500px;"
-                    "margin-bottom:10px;padding:8px;background:#222;color:#eee;"
+                    "oninput=\"filterSigns(this.value)\" style=\"width:100%;"
+                    "margin-bottom:8px;padding:8px;background:#222;color:#eee;"
                     "border:1px solid #555;border-radius:4px;font-family:monospace;\">"
+                    "<div style=\"margin-bottom:8px\">"
+                    "<button class=\"btn-gray\" type=\"button\" onclick=\"selectAll()\">&#x2611; Select All</button>"
+                    " <button class=\"btn-gray\" type=\"button\" onclick=\"deselectAll()\">&#x2610; Deselect All</button>"
+                    "</div>"
                     "<form method=\"POST\" action=\"/save-signs\">"
                     "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
                     "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favorites</button>"
-                    "</form>"
-                    "<script>"
-                    "function filterSigns(q){"
-                    "q=q.toLowerCase();"
-                    "var items=document.querySelectorAll('.sign-item');"
-                    "for(var i=0;i<items.length;i++){"
-                    "items[i].style.display="
-                    "items[i].textContent.toLowerCase().indexOf(q)>=0?'':'none';}}"
+                    "</form></div>"
+                    "<div id=\"pvpanel\" style=\"width:200px;flex-shrink:0;background:#0a0a0a;"
+                    "border:1px solid #333;border-radius:6px;padding:10px;display:none;"
+                    "position:sticky;top:10px;\">"
+                    "<div style=\"color:#ffaa00;font-weight:bold;margin-bottom:6px;font-size:0.85em\">Preview</div>"
+                    "<div id=\"pvname\" style=\"color:#00ccff;font-size:0.78em;margin-bottom:6px;word-break:break-word\"></div>"
+                    "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;word-break:break-word\"></div>"
+                    "</div></div>"
+                    "<script>" + msg_js +
+                    "function filterSigns(q){q=q.toLowerCase();"
+                    "document.querySelectorAll('.sign-item').forEach(function(el){"
+                    "el.style.display=el.textContent.toLowerCase().includes(q)?'':'none';});}"
+                    "function selectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
+                    ".forEach(function(b){b.checked=true;});}"
+                    "function deselectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
+                    ".forEach(function(b){b.checked=false;});}"
+                    "function showPreview(n){var m=MSGS[n]||'No data';"
+                    "document.getElementById('pvname').textContent=n;"
+                    "document.getElementById('pvmsg').textContent=m.replace(/ \/ /g,'\n').replace(/ \| /g,'\n');"
+                    "document.getElementById('pvpanel').style.display='block';}"
+                    "function hidePreview(){document.getElementById('pvpanel').style.display='none';}"
                     "</script>"
                 )
             else:
-                sign_section = (
-                    "<p style=\"color:#aaa\">No sign cache found. "
-                    "Click Refresh to load signs from NY511.</p>"
-                )
+                sign_section = "<p style=\"color:#aaa\">No sign cache found. Click Refresh to load signs from NY511.</p>"
 
             w.feed()
             body = (
@@ -1310,16 +1361,14 @@ if HAS_HTTPSERVER and pool is not None:
                 "<form method=\"POST\" action=\"/refresh-signs-cache\" style=\"display:inline\">"
                 "<button class=\"btn-cyan\" type=\"submit\">&#x1F504; Refresh from NY511</button>"
                 "</form>"
-                "<span style=\"color:#888;margin-left:15px;font-size:0.9em\">"
-                "Fetches ~930 signs. Takes 15-20 seconds.</span>"
+                "<span style=\"color:#888;margin-left:15px;font-size:0.9em\">Fetches ~930 signs. Takes 15-20 seconds.</span>"
                 "</div>"
                 "<div class=\"card\">" + sign_section + "</div>"
                 "</body></html>"
             )
-            w.feed()
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
+                # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
         # Returns immediately to the browser to avoid watchdog timeout.
         # The actual fetch is done by the main loop on the next cycle.
         @server.route("/refresh-signs-cache", "POST")
