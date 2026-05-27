@@ -235,8 +235,9 @@ sign_text_color  = hex_to_int(settings.get("sign_text_color", "#F7B500"))
 name_disp_secs   = int(settings.get("name_display_seconds", 3))
 msg_disp_secs    = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs = int(settings.get("cycle_sleep_seconds", 30))
-print(f"Settings: color_order={color_order} text_color={hex(sign_text_color)} "
-      f"name={name_disp_secs}s msg={msg_disp_secs}s cycle={cycle_sleep_secs}s")
+print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color)
+      + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
+      + "s cycle=" + str(cycle_sleep_secs) + "s")
 
 # --- signs.json — favourite sign names (replaces sign_list.txt) ---
 SIGNS_FILE       = "signs.json"
@@ -989,8 +990,9 @@ if HAS_HTTPSERVER and pool is not None:
 
                 status = "Saved! Color order change requires reboot." if ok else "Save failed."
                 cls = "status-ok" if ok else "status-err"
-                print(f"Settings saved: order={new_order} color={new_color} "
-                      f"name={new_name_secs}s msg={new_msg_secs}s cycle={new_cycle_secs}s")
+                print("Settings saved: order=" + new_order + " color=" + new_color
+                      + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
+                      + "s cycle=" + str(new_cycle_secs) + "s")
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
