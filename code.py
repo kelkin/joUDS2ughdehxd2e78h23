@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.7"
+LOCAL_VERSION = "2.2.8"
 
 # --- Imports ---
 import ssl
@@ -172,7 +172,7 @@ NY511_URL = "https://511ny.org/api/getmessagesigns?format=json&key=" + secrets["
 
 # OTA manifest URL (GitHub raw) — stored in secrets so it doesn't ship in code
 ENABLE_OTA   = secrets.get("enable_ota", False)
-MANIFEST_URL = secrets.get("github_version_url", "")
+MANIFEST_URL = secrets.get("github_version_url", "https://raw.githubusercontent.com/kelkin/TrafficMatrixNY/main/ota_manifest.json")
 
 # --- settings.json — all user-configurable values ---
 # secrets.py only holds ssid/password/ny511key.
@@ -230,7 +230,7 @@ def hex_to_int(hex_str):
 settings = load_settings()
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
-sign_text_color     = hex_to_int(settings.get("sign_text_color", "#F7B500"))
+sign_text_color     = [hex_to_int(settings.get("sign_text_color", "#F7B500"))]  # Mutable — works across closures
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
@@ -239,7 +239,7 @@ width               = int(settings.get("width", 192))
 height              = int(settings.get("height", 32))
 bit_depth           = int(settings.get("depth", 6))
 matrix_debug        = bool(settings.get("matrix_debug", False))
-print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color)
+print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color[0])
       + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
       + "s cycle=" + str(cycle_sleep_secs) + "s")
 
@@ -303,7 +303,7 @@ def refresh_signs_cache_from_api():
             except Exception:
                 pass
         # Restore normal display color
-        matrixportal.set_text_color(sign_text_color, 0)
+        matrixportal.set_text_color(sign_text_color[0], 0)
         matrixportal.set_text("", 0)
         gc.collect()
 
@@ -376,7 +376,7 @@ matrixportal.add_text(
     text_position=(0, 15),
     scrolling=False,
     line_spacing=0.8,
-    text_color=sign_text_color  # loaded from settings.json
+    text_color=sign_text_color[0]  # loaded from settings.json
 )
 w.feed()
 
@@ -866,7 +866,8 @@ def html_head(title):
 def html_nav(active):
     tabs = [("log","/","&#x1F4CB; Log"),
             ("settings","/settings","&#x2699;&#xFE0F; Settings"),
-            ("signs","/signs","&#x1F6A6; Traffic Signs")]
+            ("signs","/signs","&#x1F6A6; Traffic Signs"),
+            ("sync","/sync","&#x1F4E1; Sync")]
     nav = "<nav>"
     for key, href, label in tabs:
         cls = " class=\"active\"" if active == key else ""
@@ -939,20 +940,47 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── POST /reboot ──────────────────────────────────────────────────
-        @server.route("/reboot", "POST")
-        def route_reboot(request):
-            print("Reboot requested via web UI.")
+        # ── GET /rebooting — Safe landing page after reboot redirect ────
+        # This is a GET route so browser refresh won't re-trigger the reboot.
+        # Polls the board every 2 seconds until it comes back online.
+        @server.route("/rebooting", GET)
+        def route_rebooting(request):
             body = (
                 html_head("Rebooting...") +
                 "<body>" + html_nav("log") +
                 "<h1>&#x1F6A8; Rebooting...</h1>"
-                "<p>The board is rebooting. Reconnecting in 8 seconds...</p>"
-                "<script>setTimeout(function(){window.location='/'},8000);</script>"
+                "<p style=\"color:#aaa\">Board is restarting. Waiting for it to come back...</p>"
+                "<p id=\"status\" style=\"color:#ffaa00\">&#x23F3; Connecting...</p>"
+                "<script>"
+                "function tryReconnect(){"
+                "  fetch('/').then(function(r){"
+                "    if(r.ok){window.location='/';}"
+                "    else{setTimeout(tryReconnect,2000);}"
+                "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                "}"
+                "setTimeout(tryReconnect,3000);"
+                "</script>"
                 "</body></html>"
             )
-            resp = Response(request, content_type="text/html", body=body)
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
+        # ── POST /reboot ──────────────────────────────────────────────────
+        # Uses Post/Redirect/Get pattern:
+        # 1. Send a 303 redirect to /rebooting (GET) before rebooting
+        # 2. Browser follows redirect, address bar now shows /rebooting
+        # 3. Board reboots — browser retries GET /rebooting harmlessly
+        # 4. Page polls until board is back, then redirects to /
+        # This prevents the "refresh re-submits POST and reboots again" problem.
+        @server.route("/reboot", "POST")
+        def route_reboot(request):
+            print("Reboot requested via web UI.")
             import supervisor
+            # Send redirect response first, then reboot
+            resp = Response(request,
+                          status=(303, "See Other"),
+                          headers={"Location": "/rebooting", "Connection": "close"},
+                          body="")
             supervisor.reload()
             return resp
 
@@ -1033,7 +1061,7 @@ if HAS_HTTPSERVER and pool is not None:
         # ── POST /save-settings ───────────────────────────────────────────
         @server.route("/save-settings", "POST")
         def route_save_settings(request):
-            global sign_text_color, name_disp_secs, msg_disp_secs, cycle_sleep_secs
+            global name_disp_secs, msg_disp_secs, cycle_sleep_secs
             try:
                 p = parse_post_body(request)
                 print("POST params: " + str(p))  # Debug — remove after confirming
@@ -1043,8 +1071,13 @@ if HAS_HTTPSERVER and pool is not None:
                     new_order = "RGB"
 
                 new_color = p.get("sign_text_color", settings.get("sign_text_color", "#F7B500"))
+                # URL-decode %23 -> # (some browsers encode the # in color values)
+                new_color = new_color.replace("%23", "#")
                 if not new_color.startswith("#"):
-                    new_color = "#" + new_color  # Some browsers omit the #
+                    new_color = "#" + new_color
+                # Validate it looks like a hex color, fall back to current if not
+                if len(new_color) != 7:
+                    new_color = settings.get("sign_text_color", "#F7B500")
 
                 # Use current values as defaults so missing fields don't reset to 0
                 cur_n_h, cur_n_m, cur_n_s = secs_to_hms(name_disp_secs)
@@ -1070,10 +1103,10 @@ if HAS_HTTPSERVER and pool is not None:
                 name_disp_secs   = new_name_secs
                 msg_disp_secs    = new_msg_secs
                 cycle_sleep_secs = new_cycle_secs
-                sign_text_color  = hex_to_int(new_color)
-                matrixportal.set_text_color(sign_text_color, 0)
+                sign_text_color[0] = hex_to_int(new_color)
+                matrixportal.set_text_color(sign_text_color[0], 0)
 
-                status = "Saved! Color order change requires reboot." if ok else "Save failed."
+                status = ("Saved! Reboot required to apply color order change." if new_order != color_order else "Saved!") if ok else "Save failed."
                 cls = "status-ok" if ok else "status-err"
                 print("Settings saved: order=" + new_order + " color=" + new_color
                       + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
@@ -1384,6 +1417,168 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
+        # ── GET /export-settings — Serve settings bundle for sync ───────
+        @server.route("/export-settings", GET)
+        def route_export_settings(request):
+            try:
+                with open(SETTINGS_FILE, "r") as f:
+                    settings_data = f.read()
+            except Exception:
+                settings_data = "{}"
+            try:
+                with open(SIGNS_FILE, "r") as f:
+                    signs_data = f.read()
+            except Exception:
+                signs_data = '{"favorites":[]}'
+            bundle = json.dumps({
+                "settings": json.loads(settings_data),
+                "signs":    json.loads(signs_data),
+                "source_ip": str(wifi.radio.ipv4_address),
+                "source_version": LOCAL_VERSION
+            })
+            print(f"Export requested by {request.client_address}")
+            return Response(request, content_type="application/json",
+                          headers={"Connection":"close"}, body=bundle)
+
+        # ── GET /sync — Sync UI page ──────────────────────────────────────
+        @server.route("/sync", GET)
+        def route_sync_page(request):
+            body = (
+                html_head("Matrix Portal S3 - Sync") +
+                "<body>" + html_nav("sync") +
+                "<h1>&#x1F4E1; Sync from Another Unit</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Enter the IP address of the source unit "
+                "and select which files to sync. Your current files will be overwritten.</p>"
+                "<form method=\"POST\" action=\"/sync-from\">"
+                "<div class=\"row\">"
+                "<label>Source IP:</label>"
+                "<input type=\"text\" name=\"source_ip\" placeholder=\"192.168.x.x\" "
+                "style=\"width:160px\" required>"
+                "</div><br>"
+                "<div class=\"row\">"
+                "<label style=\"min-width:0\">"
+                "<input type=\"checkbox\" name=\"sync_settings\" value=\"1\" checked> "
+                "Sync <strong>settings.json</strong> "
+                "<span style=\"color:#888\">(color, timing, display settings)</span>"
+                "</label>"
+                "</div>"
+                "<div class=\"row\" style=\"margin-top:8px\">"
+                "<label style=\"min-width:0\">"
+                "<input type=\"checkbox\" name=\"sync_signs\" value=\"1\" checked> "
+                "Sync <strong>signs.json</strong> "
+                "<span style=\"color:#888\">(favourite sign list)</span>"
+                "</label>"
+                "</div><br>"
+                "<button class=\"btn-cyan\" type=\"submit\">&#x1F4E1; Sync Now</button>"
+                "</form></div>"
+                "<div class=\"card\">"
+                "<h2>Export This Unit</h2>"
+                "<p style=\"color:#aaa\">Other units can sync from this one at:</p>"
+                "<p><strong style=\"color:#00ccff\">http://" + str(wifi.radio.ipv4_address) + "/export-settings</strong></p>"
+                "</div>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
+        # ── POST /sync-from — Fetch and apply settings from another unit ──
+        @server.route("/sync-from", "POST")
+        def route_sync_from(request):
+            p = parse_post_body(request)
+            source_ip = p.get("source_ip", "").strip()
+            do_settings = p.get("sync_settings", "") == "1"
+            do_signs    = p.get("sync_signs", "")    == "1"
+
+            if not source_ip:
+                body = (html_head("Sync Error") + "<body>" + html_nav("sync") +
+                        "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
+                        "<div class=\"card\"><p class=\"status-err\">No source IP provided.</p>"
+                        "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
+                        "</div></body></html>")
+                return Response(request, content_type="text/html",
+                              headers={"Connection":"close"}, body=body)
+
+            print(f"Sync requested from {source_ip} settings={do_settings} signs={do_signs}")
+            matrixportal.set_text_color(0x00FFFF, 0)
+            matrixportal.set_text(center_multiline_string("SYNCING\nFROM\n" + source_ip, characters_per_line), 0)
+            w.feed()
+
+            status_lines = []
+            cls = "status-ok"
+            sync_resp = None
+            try:
+                url = "http://" + source_ip + "/export-settings"
+                sync_resp = requests.get(url, timeout=10)
+                w.feed()
+                if sync_resp.status_code != 200:
+                    raise RuntimeError("HTTP " + str(sync_resp.status_code))
+
+                bundle = json.loads(sync_resp.text)
+                sync_resp.close()
+                sync_resp = None
+                w.feed()
+
+                source_ver = bundle.get("source_version", "?")
+                status_lines.append("Connected to v" + source_ver + " at " + source_ip)
+
+                if do_settings and "settings" in bundle:
+                    ok = save_settings(bundle["settings"])
+                    if ok:
+                        # Reload settings into memory
+                        loaded = load_settings()
+                        settings.update(loaded)
+                        sign_text_color[0] = hex_to_int(settings.get("sign_text_color","#F7B500"))
+                        matrixportal.set_text_color(sign_text_color[0], 0)
+                        status_lines.append("&#x2713; settings.json synced")
+                    else:
+                        status_lines.append("&#x2717; settings.json save failed")
+                        cls = "status-err"
+
+                if do_signs and "signs" in bundle:
+                    ok = save_favourite_signs(bundle["signs"].get("favorites", []))
+                    if ok:
+                        favsign_list.clear()
+                        favsign_list.extend(bundle["signs"].get("favorites", []))
+                        status_lines.append("&#x2713; signs.json synced ("
+                                           + str(len(favsign_list)) + " favourites)")
+                    else:
+                        status_lines.append("&#x2717; signs.json save failed")
+                        cls = "status-err"
+
+                if not do_settings and not do_signs:
+                    status_lines.append("Nothing selected to sync.")
+                    cls = "status-err"
+
+            except Exception as e:
+                status_lines.append("Sync error: " + str(e))
+                cls = "status-err"
+                log_exception(e)
+            finally:
+                if sync_resp is not None:
+                    try:
+                        sync_resp.close()
+                    except Exception:
+                        pass
+                gc.collect()
+
+            matrixportal.set_text_color(sign_text_color[0], 0)
+            matrixportal.set_text("", 0)
+
+            status_html = "<br>".join(status_lines)
+            body = (
+                html_head("Sync Complete") +
+                "<body>" + html_nav("sync") +
+                "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status_html + "</p>"
+                "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back to Sync</button></a>"
+                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot to Apply</button>"
+                "</form></div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
         server.start("0.0.0.0", port=80)
         print(f"Web server active at http://{wifi.radio.ipv4_address}/")
     except Exception as e:
@@ -1510,7 +1705,7 @@ while True:
                         clean_string(match["msg"]).replace("\\n", "\n"),
                         characters_per_line)
                     print(f"Message display:\n{centered_msg}")
-                    matrixportal.set_text_color(sign_text_color, 0)
+                    matrixportal.set_text_color(sign_text_color[0], 0)
                     matrixportal.set_text(centered_msg, 0)
                     safe_delay(msg_disp_secs)
             else:
