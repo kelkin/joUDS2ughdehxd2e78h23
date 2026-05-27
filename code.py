@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.3"
+LOCAL_VERSION = "2.2.4"
 
 # --- Imports ---
 import ssl
@@ -1390,6 +1390,17 @@ while True:
     w.feed()
     gc.collect()
 
+    # Recreate the requests session every 5 cycles to flush SSL/socket buffers.
+    # adafruit_requests holds SSL state that doesn't fully release between calls,
+    # causing ~500KB RAM leak per cycle. Periodic recreation recovers this memory.
+    if cycles > 1 and cycles % 5 == 0 and pool is not None:
+        try:
+            requests = adafruit_requests.Session(pool, ssl_context)
+            gc.collect()
+            print(f"Requests session refreshed. RAM: {gc.mem_free()} bytes")
+        except Exception as _sess_err:
+            print(f"Session refresh failed: {_sess_err}")
+
     # Handle pending sign cache refresh (queued by web UI)
     if _refresh_cache_pending[0]:
         _refresh_cache_pending[0] = False
@@ -1499,7 +1510,7 @@ while True:
         matched_signs = None
         gc.collect()
         gc.collect()
+        gc.collect()  # Three passes — SSL buffers sometimes need extra cycles
 
-    print(f"Cycle complete. Waiting {cycle_sleep_secs}s...")
+    print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
-
