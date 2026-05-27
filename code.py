@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.14"
+LOCAL_VERSION = "2.2.15"
 
 # --- Imports ---
 import ssl
@@ -653,6 +653,12 @@ def poll_server():
     else:
         poll_rescue_server()
 
+# --- Shared mutable flags (defined here so safe_delay can reference them
+#     before the web server block initializes further below) ---
+_calib_state          = {"active": False}
+_refresh_cache_pending = [False]  # Set by web UI, consumed by main loop
+_reboot_pending        = [False]  # Set by web routes, handled by main loop after response flushes
+
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
     polling the web server so the log page stays responsive.
@@ -1000,9 +1006,6 @@ def parse_post_body(request):
         print(f"parse_post_body error: {e}")
     return params
 
-_calib_state = {"active": False}
-_refresh_cache_pending = [False]  # Mutable container — works across closure scopes
-_reboot_pending = [False]  # Set by web routes, handled by main loop after response flushes
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
