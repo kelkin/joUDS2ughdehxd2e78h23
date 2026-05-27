@@ -1400,7 +1400,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<table class=\"calib\"><tr>" + rows + "</tr></table><br>"
                 "<button class=\"btn-green\" type=\"submit\" id=\"applybtn\" disabled "
                 "style=\"font-size:1.1em;padding:10px 30px;\">&#x2713; Apply Color Order</button>"
-                "<a href=\"/settings\"><button class=\"btn-gray\" type=\"button\" "
+                "<a href=\"/calibrate-cancel\"><button class=\"btn-gray\" type=\"button\" "
                 "style=\"margin-left:10px;\">Cancel</button></a>"
                 "</form></div>"
                 "<script>"
@@ -1420,6 +1420,27 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
+        # ── GET /calibrate-cancel — Restore display and go back to settings ─
+        @server.route("/calibrate-cancel", GET)
+        def route_calibrate_cancel(request):
+            global _calib_state
+            _calib_state["active"] = False
+            try:
+                matrixportal.display.root_group = matrixportal.splash
+                print("Calibration cancelled — display restored.")
+            except Exception as e:
+                print(f"Display restore error: {e}")
+            body = (
+                html_head("Calibration Cancelled") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                "<div class=\"card\"><p style=\"color:#aaa\">Calibration cancelled. Display restored.</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
         # ── POST /calibrate-result ────────────────────────────────────────
         @server.route("/calibrate-result", "POST")
         def route_calibrate_result(request):
@@ -1431,9 +1452,11 @@ if HAS_HTTPSERVER and pool is not None:
                 pass
             try:
                 p = parse_post_body(request)
+                print("Calibration POST body: " + str(p))  # Debug
                 p1 = p.get("p1", "R").upper()
                 p2 = p.get("p2", "G").upper()
                 p3 = p.get("p3", "B").upper()
+                print(f"Calibration: P1={p1} P2={p2} P3={p3}")
                 # Board sent P1=R, P2=G, P3=B.
                 # User reports what they see on each numbered panel.
                 # Concatenating gives the correct color_order string.
