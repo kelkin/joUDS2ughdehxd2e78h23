@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.1.4"
+LOCAL_VERSION = "2.1.5"
 
 # --- Imports ---
 import ssl
@@ -174,11 +174,12 @@ NY511_URL = "https://511ny.org/api/getmessagesigns?format=json&key=" + secrets["
 ENABLE_OTA   = secrets.get("enable_ota", False)
 MANIFEST_URL = secrets.get("github_version_url", "")
 
-# --- Hardware constants (never change without reflashing) ---
-width               = 64
-height              = 32
-bit_depth           = 4
-matrix_debug        = False
+# Hardware geometry — read from secrets.py so multi-panel setups work correctly.
+# For a 3x 64x32 panel setup: width=192, height=32, depth=4
+width               = int(secrets.get("width", 64))
+height              = int(secrets.get("height", 32))
+bit_depth           = int(secrets.get("depth", 4))
+matrix_debug        = bool(secrets.get("matrix_debug", False))
 characters_per_line = 10
 
 # --- settings.json — all user-configurable values ---
