@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.0"
+LOCAL_VERSION = "2.2.1"
 
 # --- Imports ---
 import ssl
@@ -246,6 +246,66 @@ print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_co
 # --- signs.json — favourite sign names (replaces sign_list.txt) ---
 SIGNS_FILE       = "signs.json"
 SIGNS_CACHE_FILE = "signs_cache.json"
+
+def refresh_signs_cache_from_api():
+    """Fetch all sign names from NY511 and save to signs_cache.json.
+    Called from the main loop so watchdog feeds work correctly throughout."""
+    print("Fetching NY511 sign cache...")
+    matrixportal.set_text_color(0x00FFFF, 0)
+    matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
+    w.feed()
+
+    resp_obj = None
+    try:
+        resp_obj = requests.get(NY511_URL, timeout=20)
+        w.feed()
+        if resp_obj.status_code != 200:
+            print(f"NY511 cache fetch failed: HTTP {resp_obj.status_code}")
+            return False
+
+        api_data = resp_obj.json()
+        w.feed()
+        resp_obj.close()
+        resp_obj = None
+
+        if not isinstance(api_data, list):
+            print("NY511 cache: unexpected response format")
+            return False
+
+        sign_names = []
+        for sign in api_data:
+            w.feed()  # Feed watchdog while iterating 933 signs
+            if "Name" in sign:
+                sign_names.append(sign["Name"])
+
+        sign_names.sort()
+        api_data = None
+        gc.collect()
+        gc.collect()
+
+        ok = save_signs_cache(sign_names)
+        print(f"NY511 cache: {len(sign_names)} signs saved={ok}")
+
+        matrixportal.set_text_color(0x00FF00, 0)
+        matrixportal.set_text(center_multiline_string(
+            "SIGNS\nCACHED", characters_per_line), 0)
+        safe_delay(2)
+        return ok
+
+    except Exception as e:
+        print(f"NY511 cache fetch error: {e}")
+        log_exception(e)
+        return False
+    finally:
+        if resp_obj is not None:
+            try:
+                resp_obj.close()
+            except Exception:
+                pass
+        # Restore normal display color
+        matrixportal.set_text_color(sign_text_color, 0)
+        matrixportal.set_text("", 0)
+        gc.collect()
 
 def load_favourite_signs():
     """Load the list of favourite sign names from signs.json."""
@@ -495,8 +555,6 @@ def poll_server():
         try:
             server.poll()
         except Exception as _poll_err:
-            # Log poll errors so they appear in the rescue console if needed
-            # but don't crash the main loop
             err_str = str(_poll_err)
             if err_str and "timed out" not in err_str and "ETIMEDOUT" not in err_str:
                 print(f"server.poll() error: {err_str}")
@@ -850,6 +908,7 @@ def parse_post_body(request):
     return params
 
 _calib_state = {"active": False}
+_refresh_cache_pending = False  # Set by web UI, consumed by main loop
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
@@ -1094,64 +1153,23 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── POST /refresh-signs-cache — Fetch NY511, save cache ───────────
+        # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
+        # Returns immediately to the browser to avoid watchdog timeout.
+        # The actual fetch is done by the main loop on the next cycle.
         @server.route("/refresh-signs-cache", "POST")
         def route_refresh_cache(request):
-            print("NY511 cache refresh requested via web UI...")
-            matrixportal.set_text_color(0x00FFFF, 0)
-            matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
-            w.feed()
-
-            sign_names = []
-            status = ""
-            cls = "status-err"
-            resp_obj = None
-            try:
-                resp_obj = requests.get(NY511_URL, timeout=20)
-                w.feed()
-                if resp_obj.status_code == 200:
-                    api_data = resp_obj.json()
-                    w.feed()
-                    resp_obj.close()
-                    resp_obj = None
-                    if isinstance(api_data, list):
-                        for sign in api_data:
-                            if "Name" in sign:
-                                sign_names.append(sign["Name"])
-                        sign_names.sort()
-                        api_data = None
-                        gc.collect()
-                        gc.collect()
-                        ok = save_signs_cache(sign_names)
-                        status = ("Cached " + str(len(sign_names)) + " signs. " +
-                                  ("Saved!" if ok else "Save failed."))
-                        cls = "status-ok" if ok else "status-err"
-                        print(f"NY511 cache: {len(sign_names)} signs saved={ok}")
-                    else:
-                        status = "Unexpected API response format."
-                else:
-                    status = "API returned HTTP " + str(resp_obj.status_code)
-            except Exception as e:
-                status = "Fetch error: " + str(e)
-                log_exception(e)
-            finally:
-                if resp_obj is not None:
-                    try:
-                        resp_obj.close()
-                    except Exception:
-                        pass
-                gc.collect()
-
-            # Restore normal display
-            matrixportal.set_text_color(sign_text_color, 0)
-            matrixportal.set_text("", 0)
-
+            global _refresh_cache_pending
+            _refresh_cache_pending = True
+            print("NY511 cache refresh queued — will run on next main loop cycle.")
             body = (
-                html_head("Signs Refreshed") +
+                html_head("Refreshing Signs...") +
                 "<body>" + html_nav("signs") +
                 "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
-                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
-                "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                "<div class=\"card\">"
+                "<p style=\"color:#ffaa00\">&#x23F3; Fetching signs from NY511...</p>"
+                "<p style=\"color:#aaa\">This takes 15-20 seconds. "
+                "The page will redirect automatically when done.</p>"
+                "<script>setTimeout(function(){window.location='/signs'},25000);</script>"
                 "</div></body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
@@ -1373,6 +1391,14 @@ while True:
     print(f"{'*' * 48}")
     w.feed()
     gc.collect()
+
+    # Handle pending sign cache refresh (queued by web UI)
+    if _refresh_cache_pending:
+        _refresh_cache_pending = False
+        if wifi.radio.connected and requests is not None:
+            refresh_signs_cache_from_api()
+        else:
+            print("Cache refresh skipped — no network.")
 
     # Reconnect WiFi if dropped
     if not wifi.radio.connected:
