@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.2"
+LOCAL_VERSION = "2.2.3"
 
 # --- Imports ---
 import ssl
@@ -549,11 +549,14 @@ def poll_rescue_server():
         gc.collect()
 
 def poll_server():
-    """Poll the active web server once. Handles both adafruit_httpserver
-    and the raw socket rescue server transparently."""
+    """Poll the active web server once, feeding the watchdog before and after.
+    server.poll() can block for several seconds while sending a large response,
+    so we must feed the watchdog both before and after each call."""
     if HAS_HTTPSERVER and server is not None:
         try:
+            w.feed()
             server.poll()
+            w.feed()
         except Exception as _poll_err:
             err_str = str(_poll_err)
             if err_str and "timed out" not in err_str and "ETIMEDOUT" not in err_str:
@@ -563,14 +566,10 @@ def poll_server():
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
-    polling the web server so the log page stays responsive.
-    Calls poll_server() twice per iteration to help complete multi-packet
-    HTTP transactions that need rapid successive poll() calls."""
+    polling the web server so the log page stays responsive."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
-        w.feed()
-        poll_server()
-        poll_server()  # Second poll helps complete in-progress HTTP transactions
+        poll_server()  # includes w.feed() before and after
         time.sleep(0.01)
 
 # --- WiFi Connection ---
