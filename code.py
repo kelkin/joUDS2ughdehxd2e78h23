@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.8"
+LOCAL_VERSION = "2.2.9"
 
 # --- Imports ---
 import ssl
@@ -181,7 +181,8 @@ SETTINGS_FILE = "settings.json"
 
 _default_settings = {
     "color_order":          "RGB",   # Hardware pixel order
-    "sign_text_color":      "#F7B500",  # Road sign yellow
+    "sign_name_color":      "#0000FF",  # Blue for sign name header
+    "sign_text_color":      "#F7B500",  # Road sign yellow for sign message
     "name_display_seconds": 3,
     "msg_display_seconds":  10,
     "cycle_sleep_seconds":  30,
@@ -231,6 +232,7 @@ settings = load_settings()
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
 sign_text_color     = [hex_to_int(settings.get("sign_text_color", "#F7B500"))]  # Mutable — works across closures
+sign_name_color     = [hex_to_int(settings.get("sign_name_color",  "#0000FF"))]  # Mutable — sign name header color
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
@@ -976,11 +978,14 @@ if HAS_HTTPSERVER and pool is not None:
         def route_reboot(request):
             print("Reboot requested via web UI.")
             import supervisor
-            # Send redirect response first, then reboot
+            # Send redirect to /rebooting (GET) so browser address bar shows a GET URL.
+            # Sleep briefly after sending to let the TCP stack flush the response
+            # before supervisor.reload() cuts the connection.
             resp = Response(request,
                           status=(303, "See Other"),
                           headers={"Location": "/rebooting", "Connection": "close"},
                           body="")
+            time.sleep(0.5)  # Give TCP stack time to flush the redirect response
             supervisor.reload()
             return resp
 
@@ -988,7 +993,8 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/settings", GET)
         def route_settings(request):
             cur_order = settings.get("color_order", "RGB")
-            cur_color = settings.get("sign_text_color", "#F7B500")
+            cur_color      = settings.get("sign_text_color", "#F7B500")
+            cur_name_color = settings.get("sign_name_color",  "#0000FF")
             n_h, n_m, n_s = secs_to_hms(int(settings.get("name_display_seconds", 3)))
             m_h, m_m, m_s = secs_to_hms(int(settings.get("msg_display_seconds", 10)))
             c_h, c_m, c_s = secs_to_hms(int(settings.get("cycle_sleep_seconds", 30)))
@@ -1026,12 +1032,19 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"row\"><label>Color Order:</label>"
                 "<select name=\"color_order\">" + order_opts + "</select></div>"
 
-                "<div class=\"row\"><label>Sign Text Color:</label>"
+                "<div class=\"row\"><label>Sign Name Color:</label>"
+                "<input type=\"color\" name=\"sign_name_color\" value=\"" + cur_name_color + "\">"
+                "<span class=\"color-preview\" id=\"cprev_name\" "
+                "style=\"background:" + cur_name_color + "\"></span>"
+                "<script>document.querySelector('[name=sign_name_color]').oninput=function(){"
+                "document.getElementById('cprev_name').style.background=this.value;};</script>"
+                "</div>"
+                "<div class=\"row\"><label>Sign Message Color:</label>"
                 "<input type=\"color\" name=\"sign_text_color\" value=\"" + cur_color + "\">"
-                "<span class=\"color-preview\" id=\"cprev\" "
+                "<span class=\"color-preview\" id=\"cprev_text\" "
                 "style=\"background:" + cur_color + "\"></span>"
                 "<script>document.querySelector('[name=sign_text_color]').oninput=function(){"
-                "document.getElementById('cprev').style.background=this.value;};</script>"
+                "document.getElementById('cprev_text').style.background=this.value;};</script>"
                 "</div>"
 
                 "<div class=\"row\"><label>Name display:</label>" +
@@ -1070,14 +1083,15 @@ if HAS_HTTPSERVER and pool is not None:
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
 
-                new_color = p.get("sign_text_color", settings.get("sign_text_color", "#F7B500"))
-                # URL-decode %23 -> # (some browsers encode the # in color values)
-                new_color = new_color.replace("%23", "#")
-                if not new_color.startswith("#"):
-                    new_color = "#" + new_color
-                # Validate it looks like a hex color, fall back to current if not
-                if len(new_color) != 7:
-                    new_color = settings.get("sign_text_color", "#F7B500")
+                def parse_color(key, fallback):
+                    v = p.get(key, settings.get(key, fallback))
+                    v = v.replace("%23", "#")
+                    if not v.startswith("#"):
+                        v = "#" + v
+                    return v if len(v) == 7 else settings.get(key, fallback)
+
+                new_color      = parse_color("sign_text_color", "#F7B500")
+                new_name_color = parse_color("sign_name_color",  "#0000FF")
 
                 # Use current values as defaults so missing fields don't reset to 0
                 cur_n_h, cur_n_m, cur_n_s = secs_to_hms(name_disp_secs)
@@ -1093,6 +1107,7 @@ if HAS_HTTPSERVER and pool is not None:
 
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
+                settings["sign_name_color"]        = new_name_color
                 settings["name_display_seconds"]  = new_name_secs
                 settings["msg_display_seconds"]   = new_msg_secs
                 settings["cycle_sleep_seconds"]   = new_cycle_secs
@@ -1104,11 +1119,13 @@ if HAS_HTTPSERVER and pool is not None:
                 msg_disp_secs    = new_msg_secs
                 cycle_sleep_secs = new_cycle_secs
                 sign_text_color[0] = hex_to_int(new_color)
+                sign_name_color[0] = hex_to_int(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
 
                 status = ("Saved! Reboot required to apply color order change." if new_order != color_order else "Saved!") if ok else "Save failed."
                 cls = "status-ok" if ok else "status-err"
-                print("Settings saved: order=" + new_order + " color=" + new_color
+                print("Settings saved: order=" + new_order
+                      + " msg_color=" + new_color + " name_color=" + new_name_color
                       + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
                       + "s cycle=" + str(new_cycle_secs) + "s")
             except Exception as e:
@@ -1529,6 +1546,7 @@ if HAS_HTTPSERVER and pool is not None:
                         loaded = load_settings()
                         settings.update(loaded)
                         sign_text_color[0] = hex_to_int(settings.get("sign_text_color","#F7B500"))
+                        sign_name_color[0] = hex_to_int(settings.get("sign_name_color","#0000FF"))
                         matrixportal.set_text_color(sign_text_color[0], 0)
                         status_lines.append("&#x2713; settings.json synced")
                     else:
@@ -1696,7 +1714,7 @@ while True:
                     centered_name = center_multiline_string(
                         clean_string(match["name"]), characters_per_line)
                     print(f"Name display:\n{centered_name}")
-                    matrixportal.set_text_color(0x0000FF, 0)
+                    matrixportal.set_text_color(sign_name_color[0], 0)
                     matrixportal.set_text(centered_name, 0)
                     safe_delay(name_disp_secs)
 
