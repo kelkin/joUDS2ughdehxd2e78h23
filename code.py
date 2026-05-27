@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.0.0"
+LOCAL_VERSION = "2.1.1"
 
 # --- Imports ---
 import ssl
@@ -160,35 +160,45 @@ except Exception as _new_err:
             except Exception:
                 web_error_message = "ERROR"
 
-# --- Configuration & Secrets ---
+# --- Secrets (ssid, password, ny511key only) ---
 try:
     from secrets import secrets
 except ImportError:
     print("WiFi secrets are kept in secrets.py, please add them there!")
     raise
 
-DATA_SOURCE_URL = secrets["url_prefix"] + secrets["ny511key"] + secrets["url_suffix"]
-ENABLE_OTA      = secrets.get("enable_ota", False)
-MANIFEST_URL    = secrets.get("github_version_url", "")
+# NY511 API URL — only the key comes from secrets, everything else is static
+NY511_URL = "https://511ny.org/api/getmessagesigns?format=json&key=" + secrets["ny511key"]
 
-debug               = secrets.get("debug", 0)
-width               = int(secrets.get("width", 64))
-height              = int(secrets.get("height", 32))
-bit_depth           = int(secrets.get("depth", 4))
-matrix_debug        = bool(secrets.get("matrix_debug", False))
-characters_per_line = int(secrets.get("characters_per_line", 10))
-sign_text_color     = secrets.get("sign_text_color", 0xF7B500)  # Road sign yellow
+# OTA manifest URL (GitHub raw) — stored in secrets so it doesn't ship in code
+ENABLE_OTA   = secrets.get("enable_ota", False)
+MANIFEST_URL = secrets.get("github_version_url", "")
 
-# --- Load settings.json (user-configurable, survives OTA) ---
+# --- Hardware constants (never change without reflashing) ---
+width               = 64
+height              = 32
+bit_depth           = 4
+matrix_debug        = False
+characters_per_line = 10
+
+# --- settings.json — all user-configurable values ---
+# secrets.py only holds ssid/password/ny511key.
+# Everything else lives here and is editable via the web UI.
 SETTINGS_FILE = "settings.json"
-_default_settings = {"color_order": secrets.get("color_order", "RGB")}
+
+_default_settings = {
+    "color_order":          "RGB",       # Hardware pixel order
+    "sign_text_color":      "#F7B500",   # Road sign yellow (hex string)
+    "name_display_seconds": 3,           # Seconds to show sign name
+    "msg_display_seconds":  10,          # Seconds to show sign message
+    "cycle_sleep_seconds":  30,          # Seconds between API refresh cycles
+}
 
 def load_settings():
-    """Load settings.json, returning defaults for any missing keys."""
+    """Load settings.json, merging with defaults for any missing keys."""
     try:
         with open(SETTINGS_FILE, "r") as f:
             data = json.loads(f.read())
-        # Merge with defaults so new keys always exist
         for k, v in _default_settings.items():
             if k not in data:
                 data[k] = v
@@ -212,9 +222,75 @@ def save_settings(data):
         print(f"save_settings failed: {e}")
         return False
 
+def hex_to_int(hex_str):
+    """Convert '#RRGGBB' or 'RRGGBB' string to integer 0xRRGGBB."""
+    try:
+        return int(hex_str.lstrip("#"), 16)
+    except Exception:
+        return 0xF7B500  # fallback to sign yellow
+
 settings = load_settings()
-color_order = settings.get("color_order", "RGB")
-print(f"Settings loaded. color_order={color_order}")
+color_order      = settings.get("color_order", "RGB")
+sign_text_color  = hex_to_int(settings.get("sign_text_color", "#F7B500"))
+name_disp_secs   = int(settings.get("name_display_seconds", 3))
+msg_disp_secs    = int(settings.get("msg_display_seconds", 10))
+cycle_sleep_secs = int(settings.get("cycle_sleep_seconds", 30))
+print(f"Settings: color_order={color_order} text_color={hex(sign_text_color)} "
+      f"name={name_disp_secs}s msg={msg_disp_secs}s cycle={cycle_sleep_secs}s")
+
+# --- signs.json — favourite sign names (replaces sign_list.txt) ---
+SIGNS_FILE       = "signs.json"
+SIGNS_CACHE_FILE = "signs_cache.json"
+
+def load_favourite_signs():
+    """Load the list of favourite sign names from signs.json."""
+    try:
+        with open(SIGNS_FILE, "r") as f:
+            data = json.loads(f.read())
+        return data.get("favorites", [])
+    except Exception:
+        return []
+
+def save_favourite_signs(favorites_list):
+    """Save the list of favourite sign names to signs.json atomically."""
+    tmp = SIGNS_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"favorites": favorites_list}))
+        try:
+            os.remove(SIGNS_FILE)
+        except OSError:
+            pass
+        os.rename(tmp, SIGNS_FILE)
+        return True
+    except Exception as e:
+        print(f"save_favourite_signs failed: {e}")
+        return False
+
+def load_signs_cache():
+    """Load cached sign names from signs_cache.json. Returns [] on any error."""
+    try:
+        with open(SIGNS_CACHE_FILE, "r") as f:
+            data = json.loads(f.read())
+        return data.get("signs", [])
+    except Exception:
+        return []
+
+def save_signs_cache(sign_names):
+    """Save a list of sign name strings to signs_cache.json atomically."""
+    tmp = SIGNS_CACHE_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"signs": sign_names}))
+        try:
+            os.remove(SIGNS_CACHE_FILE)
+        except OSError:
+            pass
+        os.rename(tmp, SIGNS_CACHE_FILE)
+        return True
+    except Exception as e:
+        print(f"save_signs_cache failed: {e}")
+        return False
 
 # --- Hardware Watchdog ---
 w.timeout = 45.0
@@ -235,7 +311,7 @@ matrixportal.add_text(
     text_position=(0, 15),
     scrolling=False,
     line_spacing=0.8,
-    text_color=sign_text_color
+    text_color=sign_text_color  # loaded from settings.json
 )
 w.feed()
 
@@ -692,31 +768,46 @@ def html_head(title):
         "white-space:pre-wrap;overflow-x:auto;margin:0;}"
         "button{font-family:monospace;font-size:1em;padding:8px 18px;"
         "border:none;border-radius:4px;cursor:pointer;margin:4px;}"
+        "input[type=text],input[type=number]{"
+        "font-family:monospace;font-size:1em;padding:6px 10px;"
+        "background:#222;color:#eee;border:1px solid #555;border-radius:4px;width:80px;}"
         "select{font-family:monospace;font-size:1em;padding:6px 10px;"
         "background:#222;color:#eee;border:1px solid #555;border-radius:4px;}"
-        "label{display:block;margin-bottom:6px;color:#aaa;}"
+        "label{display:inline-block;margin-bottom:6px;color:#aaa;min-width:120px;}"
+        ".row{margin-bottom:10px;}"
         ".btn-red{background:#cc2222;color:#fff;}.btn-red:hover{background:#ff3333;}"
         ".btn-green{background:#226622;color:#fff;}.btn-green:hover{background:#33aa33;}"
         ".btn-blue{background:#224499;color:#fff;}.btn-blue:hover{background:#3366cc;}"
         ".btn-yellow{background:#886600;color:#fff;}.btn-yellow:hover{background:#bbaa00;}"
         ".btn-gray{background:#444;color:#fff;}.btn-gray:hover{background:#666;}"
+        ".btn-cyan{background:#006666;color:#fff;}.btn-cyan:hover{background:#009999;}"
         ".status-ok{color:#33ff33;}.status-err{color:#ff3333;}"
         "table.calib{border-collapse:collapse;width:100%;margin-top:10px;}"
         "table.calib td{padding:10px;text-align:center;border:1px solid #333;vertical-align:top;width:33%;}"
         "table.calib .swatch{width:60px;height:60px;border-radius:6px;margin:0 auto 10px auto;}"
         "table.calib .color-btn{display:block;width:100%;margin:3px 0;}"
+        "#sign-filter{width:100%;max-width:400px;margin-bottom:10px;padding:8px;}"
+        ".sign-list{max-height:400px;overflow-y:auto;border:1px solid #333;"
+        "border-radius:4px;padding:8px;background:#000;}"
+        ".sign-item{padding:4px 0;border-bottom:1px solid #1a1a1a;}"
+        ".sign-item label{color:#ccc;min-width:0;cursor:pointer;}"
+        ".sign-item input[type=checkbox]{margin-right:8px;cursor:pointer;}"
+        ".sign-item.fav label{color:#F7B500;}"
+        ".color-preview{display:inline-block;width:24px;height:24px;"
+        "border-radius:3px;border:1px solid #555;vertical-align:middle;margin-left:8px;}"
         "</style></head>"
     )
 
 def html_nav(active):
-    log_cls = " class=\"active\"" if active == "log" else ""
-    set_cls = " class=\"active\"" if active == "settings" else ""
-    return (
-        "<nav>"
-        "<a href=\"/\"" + log_cls + ">&#x1F4CB; Log</a>"
-        "<a href=\"/settings\"" + set_cls + ">&#x2699;&#xFE0F; Settings</a>"
-        "</nav>"
-    )
+    tabs = [("log","/","&#x1F4CB; Log"),
+            ("settings","/settings","&#x2699;&#xFE0F; Settings"),
+            ("signs","/signs","&#x1F6A6; Traffic Signs")]
+    nav = "<nav>"
+    for key, href, label in tabs:
+        cls = " class=\"active\"" if active == key else ""
+        nav += "<a href=\"" + href + "\"" + cls + ">" + label + "</a>"
+    nav += "</nav>"
+    return nav
 
 def html_meta():
     return (
@@ -724,6 +815,31 @@ def html_meta():
         " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
         " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
     )
+
+def secs_to_hms(total):
+    """Convert total seconds integer to (h, m, s) tuple."""
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return h, m, s
+
+def hms_to_secs(h, m, s):
+    """Convert h/m/s to total seconds, clamped to minimum 1 second."""
+    total = int(h) * 3600 + int(m) * 60 + int(s)
+    return max(1, total)
+
+def parse_post_body(request):
+    """Parse a URL-encoded POST body into a dict of key->value strings."""
+    params = {}
+    try:
+        body_str = request.body.decode("utf-8") if request.body else ""
+        for part in body_str.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                params[k.strip()] = v.strip()
+    except Exception as e:
+        print(f"parse_post_body error: {e}")
+    return params
 
 _calib_state = {"active": False}
 
@@ -736,7 +852,8 @@ if HAS_HTTPSERVER and pool is not None:
         # ── GET / — Log page ──────────────────────────────────────────────
         @server.route("/", GET)
         def route_index(request):
-            logs_html = web_logger.get_logs().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            logs_html = (web_logger.get_logs()
+                         .replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
             body = (
                 html_head("Matrix Portal S3 - Log") +
                 "<body>" + html_nav("log") +
@@ -767,33 +884,73 @@ if HAS_HTTPSERVER and pool is not None:
         # ── GET /settings ─────────────────────────────────────────────────
         @server.route("/settings", GET)
         def route_settings(request):
-            current = settings.get("color_order", "RGB")
-            opts = ""
+            cur_order = settings.get("color_order", "RGB")
+            cur_color = settings.get("sign_text_color", "#F7B500")
+            n_h, n_m, n_s = secs_to_hms(int(settings.get("name_display_seconds", 3)))
+            m_h, m_m, m_s = secs_to_hms(int(settings.get("msg_display_seconds", 10)))
+            c_h, c_m, c_s = secs_to_hms(int(settings.get("cycle_sleep_seconds", 30)))
+
+            order_opts = ""
             for o in VALID_COLOR_ORDERS:
-                sel = " selected" if o == current else ""
-                opts += "<option value=\"" + o + "\"" + sel + ">" + o + "</option>"
+                sel = " selected" if o == cur_order else ""
+                order_opts += "<option value=\"" + o + "\"" + sel + ">" + o + "</option>"
+
+            def hms_inputs(prefix, h, m, s):
+                return (
+                    "<input type=\"number\" name=\"" + prefix + "_h\" value=\"" + str(h) +
+                    "\" min=\"0\" max=\"23\" style=\"width:55px\"> h &nbsp;"
+                    "<input type=\"number\" name=\"" + prefix + "_m\" value=\"" + str(m) +
+                    "\" min=\"0\" max=\"59\" style=\"width:55px\"> m &nbsp;"
+                    "<input type=\"number\" name=\"" + prefix + "_s\" value=\"" + str(s) +
+                    "\" min=\"0\" max=\"59\" style=\"width:55px\"> s"
+                )
+
             body = (
                 html_head("Matrix Portal S3 - Settings") +
                 "<body>" + html_nav("settings") +
                 "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+
+                # Reboot
                 "<div class=\"card\"><h2>System</h2>"
                 "<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Board</button>"
                 "</form></div>"
-                "<div class=\"card\"><h2>Display Color Order</h2>"
-                "<p style=\"color:#aaa\">Current: <strong style=\"color:#fff\">" + current + "</strong>"
-                " &mdash; Change takes effect after reboot.</p>"
+
+                # All settings in one form
+                "<div class=\"card\"><h2>Display Settings</h2>"
                 "<form method=\"POST\" action=\"/save-settings\">"
-                "<label for=\"co\">Color Order:</label>"
-                "<select name=\"color_order\" id=\"co\">" + opts + "</select>"
-                "&nbsp;<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save</button>"
+
+                "<div class=\"row\"><label>Color Order:</label>"
+                "<select name=\"color_order\">" + order_opts + "</select></div>"
+
+                "<div class=\"row\"><label>Sign Text Color:</label>"
+                "<input type=\"color\" name=\"sign_text_color\" value=\"" + cur_color + "\">"
+                "<span class=\"color-preview\" id=\"cprev\" "
+                "style=\"background:" + cur_color + "\"></span>"
+                "<script>document.querySelector('[name=sign_text_color]').oninput=function(){"
+                "document.getElementById('cprev').style.background=this.value;};</script>"
+                "</div>"
+
+                "<div class=\"row\"><label>Name display:</label>" +
+                hms_inputs("name", n_h, n_m, n_s) + "</div>"
+
+                "<div class=\"row\"><label>Message display:</label>" +
+                hms_inputs("msg", m_h, m_m, m_s) + "</div>"
+
+                "<div class=\"row\"><label>Cycle interval:</label>" +
+                hms_inputs("cycle", c_h, c_m, c_s) + "</div>"
+
+                "<br><button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Settings</button>"
                 "</form></div>"
+
+                # RGB Calibration
                 "<div class=\"card\"><h2>&#x1F3A8; RGB Order Calibration Wizard</h2>"
                 "<p style=\"color:#aaa\">Illuminates each panel a different primary color "
                 "at 20% brightness so you can identify the correct order for your hardware.</p>"
                 "<form method=\"POST\" action=\"/calibrate\">"
                 "<button class=\"btn-yellow\" type=\"submit\">&#x25B6; Start Calibration</button>"
                 "</form></div>"
+
                 "</body></html>"
             )
             return Response(request, content_type="text/html", body=body)
@@ -801,24 +958,44 @@ if HAS_HTTPSERVER and pool is not None:
         # ── POST /save-settings ───────────────────────────────────────────
         @server.route("/save-settings", "POST")
         def route_save_settings(request):
+            global sign_text_color, name_disp_secs, msg_disp_secs, cycle_sleep_secs
             try:
-                body_str = request.body.decode("utf-8") if request.body else ""
-                new_order = "RGB"
-                for part in body_str.split("&"):
-                    if part.startswith("color_order="):
-                        new_order = part.split("=", 1)[1].strip().upper()
-                        break
+                p = parse_post_body(request)
+                new_order = p.get("color_order", "RGB").upper()
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
-                settings["color_order"] = new_order
+                new_color = p.get("sign_text_color", "#F7B500")
+                if not new_color.startswith("#"):
+                    new_color = "#F7B500"
+
+                new_name_secs  = hms_to_secs(p.get("name_h",0), p.get("name_m",0), p.get("name_s",3))
+                new_msg_secs   = hms_to_secs(p.get("msg_h",0),  p.get("msg_m",0),  p.get("msg_s",10))
+                new_cycle_secs = hms_to_secs(p.get("cycle_h",0),p.get("cycle_m",0),p.get("cycle_s",30))
+
+                settings["color_order"]          = new_order
+                settings["sign_text_color"]       = new_color
+                settings["name_display_seconds"]  = new_name_secs
+                settings["msg_display_seconds"]   = new_msg_secs
+                settings["cycle_sleep_seconds"]   = new_cycle_secs
+
                 ok = save_settings(settings)
-                status = "Saved! Reboot to apply." if ok else "Save failed."
+
+                # Apply timing changes immediately (no reboot needed)
+                name_disp_secs   = new_name_secs
+                msg_disp_secs    = new_msg_secs
+                cycle_sleep_secs = new_cycle_secs
+                sign_text_color  = hex_to_int(new_color)
+                matrixportal.set_text_color(sign_text_color, 0)
+
+                status = "Saved! Color order change requires reboot." if ok else "Save failed."
                 cls = "status-ok" if ok else "status-err"
-                print(f"color_order saved: {new_order} ok={ok}")
+                print(f"Settings saved: order={new_order} color={new_color} "
+                      f"name={new_name_secs}s msg={new_msg_secs}s cycle={new_cycle_secs}s")
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
                 log_exception(e)
+
             body = (
                 html_head("Settings Saved") +
                 "<body>" + html_nav("settings") +
@@ -827,8 +1004,175 @@ if HAS_HTTPSERVER and pool is not None:
                 "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
                 "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
-                "</form></div>"
+                "</form></div></body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
+        # ── GET /signs — Traffic Signs page ───────────────────────────────
+        @server.route("/signs", GET)
+        def route_signs(request):
+            cached = load_signs_cache()
+            favs   = set(load_favourite_signs())
+            cache_count = len(cached)
+
+            if cached:
+                # Build checkbox list sorted alphabetically, favourites first
+                fav_items   = sorted([s for s in cached if s in favs])
+                other_items = sorted([s for s in cached if s not in favs])
+                all_items   = fav_items + other_items
+
+                items_html = ""
+                for name in all_items:
+                    checked = " checked" if name in favs else ""
+                    fav_cls = " fav" if name in favs else ""
+                    safe_name = (name.replace("&","&amp;").replace("<","&lt;")
+                                     .replace(">","&gt;").replace("\"","&quot;"))
+                    items_html += (
+                        "<div class=\"sign-item" + fav_cls + "\">"
+                        "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
+                        safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
+                    )
+
+                sign_section = (
+                    "<p style=\"color:#aaa\">" + str(cache_count) +
+                    " signs cached. Favourites shown in "
+                    "<span style=\"color:#F7B500\">yellow</span>.</p>"
+                    "<input type=\"text\" id=\"sign-filter\" placeholder=\"Filter signs...\" "
+                    "oninput=\"filterSigns(this.value)\" style=\"width:100%;max-width:500px;"
+                    "margin-bottom:10px;padding:8px;background:#222;color:#eee;"
+                    "border:1px solid #555;border-radius:4px;font-family:monospace;\">"
+                    "<form method=\"POST\" action=\"/save-signs\">"
+                    "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
+                    "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favourites</button>"
+                    "</form>"
+                    "<script>"
+                    "function filterSigns(q){"
+                    "q=q.toLowerCase();"
+                    "var items=document.querySelectorAll('.sign-item');"
+                    "for(var i=0;i<items.length;i++){"
+                    "items[i].style.display="
+                    "items[i].textContent.toLowerCase().indexOf(q)>=0?'':'none';}}"
+                    "</script>"
+                )
+            else:
+                sign_section = (
+                    "<p style=\"color:#aaa\">No sign cache found. "
+                    "Click Refresh to load signs from NY511.</p>"
+                )
+
+            body = (
+                html_head("Traffic Signs") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<form method=\"POST\" action=\"/refresh-signs-cache\" style=\"display:inline\">"
+                "<button class=\"btn-cyan\" type=\"submit\">&#x1F504; Refresh from NY511</button>"
+                "</form>"
+                "<span style=\"color:#888;margin-left:15px;font-size:0.9em\">"
+                "Fetches ~930 signs. Takes 15-20 seconds.</span>"
+                "</div>"
+                "<div class=\"card\">" + sign_section + "</div>"
                 "</body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
+        # ── POST /refresh-signs-cache — Fetch NY511, save cache ───────────
+        @server.route("/refresh-signs-cache", "POST")
+        def route_refresh_cache(request):
+            print("NY511 cache refresh requested via web UI...")
+            matrixportal.set_text_color(0x00FFFF, 0)
+            matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
+            w.feed()
+
+            sign_names = []
+            status = ""
+            cls = "status-err"
+            resp_obj = None
+            try:
+                resp_obj = requests.get(NY511_URL, timeout=20)
+                w.feed()
+                if resp_obj.status_code == 200:
+                    api_data = resp_obj.json()
+                    w.feed()
+                    resp_obj.close()
+                    resp_obj = None
+                    if isinstance(api_data, list):
+                        for sign in api_data:
+                            if "Name" in sign:
+                                sign_names.append(sign["Name"])
+                        sign_names.sort()
+                        api_data = None
+                        gc.collect()
+                        gc.collect()
+                        ok = save_signs_cache(sign_names)
+                        status = ("Cached " + str(len(sign_names)) + " signs. " +
+                                  ("Saved!" if ok else "Save failed."))
+                        cls = "status-ok" if ok else "status-err"
+                        print(f"NY511 cache: {len(sign_names)} signs saved={ok}")
+                    else:
+                        status = "Unexpected API response format."
+                else:
+                    status = "API returned HTTP " + str(resp_obj.status_code)
+            except Exception as e:
+                status = "Fetch error: " + str(e)
+                log_exception(e)
+            finally:
+                if resp_obj is not None:
+                    try:
+                        resp_obj.close()
+                    except Exception:
+                        pass
+                gc.collect()
+
+            # Restore normal display
+            matrixportal.set_text_color(sign_text_color, 0)
+            matrixportal.set_text("", 0)
+
+            body = (
+                html_head("Signs Refreshed") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html", body=body)
+
+        # ── POST /save-signs — Save favourite selections ──────────────────
+        @server.route("/save-signs", "POST")
+        def route_save_signs(request):
+            global favsign_list
+            try:
+                body_str = request.body.decode("utf-8") if request.body else ""
+                selected = []
+                for part in body_str.split("&"):
+                    if part.startswith("fav="):
+                        # URL-decode the sign name (replace + with space, %XX)
+                        name = part[4:]
+                        name = name.replace("+", " ")
+                        # Basic percent-decode for common chars
+                        for code, char in [("%2C",","),("%28","("),("%29",")")
+                                           ,("%2F","/"),("%3A",":")]:
+                            name = name.replace(code, char)
+                        if name:
+                            selected.append(name)
+                ok = save_favourite_signs(selected)
+                favsign_list = selected  # Update live list immediately
+                status = "Saved " + str(len(selected)) + " favourite sign(s)."
+                cls = "status-ok" if ok else "status-err"
+                print(f"Favourites saved: {len(selected)} signs ok={ok}")
+            except Exception as e:
+                status = "Error: " + str(e)
+                cls = "status-err"
+                log_exception(e)
+
+            body = (
+                html_head("Signs Saved") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                "</div></body></html>"
             )
             return Response(request, content_type="text/html", body=body)
 
@@ -842,9 +1186,9 @@ if HAS_HTTPSERVER and pool is not None:
                 display = matrixportal.display
                 bmp = displayio.Bitmap(width, height, 3)
                 pal = displayio.Palette(3)
-                pal[0] = 0x330000  # dim red   — left panel
-                pal[1] = 0x003300  # dim green — mid panel
-                pal[2] = 0x000033  # dim blue  — right panel
+                pal[0] = 0x330000
+                pal[1] = 0x003300
+                pal[2] = 0x000033
                 panel_w = width // 3
                 for y in range(height):
                     for x in range(width):
@@ -880,8 +1224,8 @@ if HAS_HTTPSERVER and pool is not None:
                 "<body>" + html_nav("settings") +
                 "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
                 "<div class=\"card\">"
-                "<p style=\"color:#aaa\">Look at your display. Each third should be lit a dim color. "
-                "Click the color you <strong>actually see</strong> for each panel.</p>"
+                "<p style=\"color:#aaa\">Look at your display. Each third should be lit a dim "
+                "color. Click the color you <strong>actually see</strong> for each panel.</p>"
                 "<form method=\"POST\" action=\"/calibrate-result\" id=\"calform\">"
                 "<input type=\"hidden\" name=\"left\" id=\"v_Left\">"
                 "<input type=\"hidden\" name=\"mid\" id=\"v_Middle\">"
@@ -909,7 +1253,7 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", body=body)
 
-        # ── POST /calibrate-result — Derive and save color order ──────────
+        # ── POST /calibrate-result ────────────────────────────────────────
         @server.route("/calibrate-result", "POST")
         def route_calibrate_result(request):
             global _calib_state
@@ -919,29 +1263,24 @@ if HAS_HTTPSERVER and pool is not None:
             except Exception:
                 pass
             try:
-                body_str = request.body.decode("utf-8") if request.body else ""
-                params = {}
-                for part in body_str.split("&"):
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        params[k.strip()] = v.strip().upper()
-                left  = params.get("left",  "R")
-                mid   = params.get("mid",   "G")
-                right = params.get("right", "B")
-                # Board sent Left=R, Mid=G, Right=B.
-                # User reports what they see — that IS the color_order string.
+                p = parse_post_body(request)
+                left  = p.get("left",  "R").upper()
+                mid   = p.get("mid",   "G").upper()
+                right = p.get("right", "B").upper()
                 order_str = left + mid + right
                 if order_str not in VALID_COLOR_ORDERS:
                     raise ValueError("Invalid order: " + order_str)
                 settings["color_order"] = order_str
                 ok = save_settings(settings)
                 print(f"Calibration: L={left} M={mid} R={right} -> {order_str} saved={ok}")
-                status = "Color order set to <strong>" + order_str + "</strong>. " + ("Saved! Reboot to apply." if ok else "Save failed.")
+                status = ("Color order set to <strong>" + order_str + "</strong>. " +
+                          ("Saved! Reboot to apply." if ok else "Save failed."))
                 cls = "status-ok" if ok else "status-err"
             except Exception as e:
                 status = "Calibration error: " + str(e)
                 cls = "status-err"
                 log_exception(e)
+
             body = (
                 html_head("Calibration Complete") +
                 "<body>" + html_nav("settings") +
@@ -950,8 +1289,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
                 "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
-                "</form></div>"
-                "</body></html>"
+                "</form></div></body></html>"
             )
             return Response(request, content_type="text/html", body=body)
 
@@ -962,19 +1300,13 @@ if HAS_HTTPSERVER and pool is not None:
         log_exception(e)
         HAS_HTTPSERVER = False
 
-# --- Load Preferred Sign List ---
-favsign_list = []
-print("Attempting to load 'sign_list.txt'")
-try:
-    with open("sign_list.txt", "r") as f:
-        for line in f:
-            sys.stdout.write(".")
-            cleaned = line.strip()
-            if cleaned:
-                favsign_list.append(cleaned)
-    print(f"\nLoaded {len(favsign_list)} entries from sign_list.txt.")
-except OSError as e:
-    print(f"\nCould not load sign_list.txt: {e}")
+# --- Load Favourite Signs List ---
+favsign_list = load_favourite_signs()
+if favsign_list:
+    print(f"Loaded {len(favsign_list)} favourite sign(s) from signs.json.")
+else:
+    print("No favourite signs loaded (signs.json missing or empty).")
+    print("Visit the Traffic Signs tab on the web UI to select signs.")
 
 # --- Main Loop ---
 cycles = 0
@@ -1004,7 +1336,7 @@ while True:
     try:
         poll_server()  # Service web requests before API fetch
 
-        response = requests.get(DATA_SOURCE_URL, timeout=15)
+        response = requests.get(NY511_URL, timeout=15)
         w.feed()
 
         poll_server()  # Service web requests after API fetch
@@ -1055,7 +1387,7 @@ while True:
                     print(f"Name display:\n{centered_name}")
                     matrixportal.set_text_color(0x0000FF, 0)
                     matrixportal.set_text(centered_name, 0)
-                    safe_delay(3)
+                    safe_delay(name_disp_secs)
 
                     # Display sign message in road-sign yellow
                     centered_msg = center_multiline_string(
@@ -1064,7 +1396,7 @@ while True:
                     print(f"Message display:\n{centered_msg}")
                     matrixportal.set_text_color(sign_text_color, 0)
                     matrixportal.set_text(centered_msg, 0)
-                    safe_delay(10)
+                    safe_delay(msg_disp_secs)
             else:
                 print(f"Unexpected API response type: {type(json_data)}")
         else:
@@ -1084,6 +1416,6 @@ while True:
         gc.collect()
         gc.collect()
 
-    print("Cycle complete. Waiting 30s...")
-    safe_delay(30)
+    print(f"Cycle complete. Waiting {cycle_sleep_secs}s...")
+    safe_delay(cycle_sleep_secs)
 
