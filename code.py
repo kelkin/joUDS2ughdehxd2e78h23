@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.11"
+LOCAL_VERSION = "2.2.13"
 
 # --- Imports ---
 import ssl
@@ -940,6 +940,7 @@ def parse_post_body(request):
 
 _calib_state = {"active": False}
 _refresh_cache_pending = [False]  # Mutable container — works across closure scopes
+_reboot_pending = [False]  # Set by web routes, handled by main loop after response flushes
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
@@ -1006,17 +1007,11 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/reboot", "POST")
         def route_reboot(request):
             print("Reboot requested via web UI.")
-            import supervisor
-            # Send redirect to /rebooting (GET) so browser address bar shows a GET URL.
-            # Sleep briefly after sending to let the TCP stack flush the response
-            # before supervisor.reload() cuts the connection.
-            resp = Response(request,
+            _reboot_pending[0] = True
+            return Response(request,
                           status=(303, "See Other"),
                           headers={"Location": "/rebooting", "Connection": "close"},
                           body="")
-            time.sleep(0.5)  # Give TCP stack time to flush the redirect response
-            supervisor.reload()
-            return resp
 
         # ── GET /settings ─────────────────────────────────────────────────
         @server.route("/settings", GET)
@@ -1315,6 +1310,33 @@ if HAS_HTTPSERVER and pool is not None:
         def route_calibrate(request):
             global _calib_state
             _calib_state["active"] = True
+
+            # Calibration ONLY works correctly when color_order is RGB.
+            # If it's currently something else, save RGB temporarily so the
+            # hardware shows raw uncorrected colors during the test.
+            # The user's selection will then produce the correct order to save.
+            calib_needs_reset = (color_order != "RGB")
+            if calib_needs_reset:
+                settings["color_order"] = "RGB"
+                save_settings(settings)
+                print("Calibration: temporarily set color_order=RGB for accurate test.")
+                print("Board must reboot to apply — redirecting to reboot first.")
+                body = (
+                    html_head("Calibration — Reboot Required") +
+                    "<body>" + html_nav("settings") +
+                    "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
+                    "<div class=\"card\">"
+                    "<p style=\"color:#ffaa00\"><strong>One moment — the board needs to reboot "
+                    "with a neutral color order before calibration can show accurate colors.</strong></p>"
+                    "<p style=\"color:#aaa\">The board will reboot automatically, then navigate "
+                    "back to Settings and click Start Calibration again.</p>"
+                    "<script>setTimeout(function(){window.location='/rebooting'},1500);</script>"
+                    "</div></body></html>"
+                )
+                # Set flag — main loop handles the actual reboot after response flushes
+                _reboot_pending[0] = True
+                return Response(request, content_type="text/html",
+                              headers={"Connection":"close"}, body=body)
             try:
                 import displayio
 
@@ -1366,8 +1388,8 @@ if HAS_HTTPSERVER and pool is not None:
 
             # Web UI — panels now labeled P1/P2/P3 to match numbers on display
             rows = ""
-            panels = [("P1","R","330000","1"),("P2","G","003300","2"),("P3","B","000033","3")]
-            for name, sent, swatch, num in panels:
+            panels = [("P1","330000","1"),("P2","003300","2"),("P3","000033","3")]
+            for name, swatch, num in panels:
                 btns = ""
                 for c, lbl, cls in [("R","Red","btn-red"),("G","Green","btn-green"),("B","Blue","btn-blue")]:
                     btns += (
@@ -1379,7 +1401,7 @@ if HAS_HTTPSERVER and pool is not None:
                     "<div class=\"swatch\" style=\"background:#" + swatch + ";"
                     "font-size:28px;font-weight:bold;color:#aaa;line-height:60px;\">" + num + "</div>"
                     "<strong>Panel " + num + "</strong><br>"
-                    "<small style=\"color:#888\">Board sent: " + sent + "</small><br><br>"
+                    "<small style=\"color:#ffaa00\">What color do you see?</small><br><br>"
                     + btns +
                     "<div id=\"sel_" + name + "\" style=\"margin-top:6px;color:#ffaa00;\"></div></td>"
                 )
@@ -1389,10 +1411,11 @@ if HAS_HTTPSERVER and pool is not None:
                 "<body>" + html_nav("settings") +
                 "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
                 "<div class=\"card\">"
-                "<p style=\"color:#aaa\">Your display now shows each panel lit a dim color "
-                "with its panel number (1, 2, 3). "
-                "For each numbered panel, click the color you "
-                "<strong>actually see</strong> on that panel below.</p>"
+                "<p style=\"color:#aaa\">Your display shows 3 panels each lit a different "
+                "dim color, numbered 1, 2, and 3.</p>"
+                "<p style=\"color:#ffaa00\"><strong>For each panel number below, click the "
+                "color you see glowing on your physical display for that panel.</strong><br>"
+                "Do not click what you expect to see — click only what you actually see.</p>"
                 "<form method=\"POST\" action=\"/calibrate-result\" id=\"calform\">"
                 "<input type=\"hidden\" name=\"p1\" id=\"v_P1\">"
                 "<input type=\"hidden\" name=\"p2\" id=\"v_P2\">"
@@ -1688,6 +1711,13 @@ while True:
             print(f"Session refresh failed: {_sess_err}")
 
     # Handle pending sign cache refresh (queued by web UI)
+    if _reboot_pending[0]:
+        _reboot_pending[0] = False
+        print("Rebooting as requested by web UI...")
+        time.sleep(0.5)  # Let any in-flight TCP data finish
+        import supervisor
+        supervisor.reload()
+
     if _refresh_cache_pending[0]:
         _refresh_cache_pending[0] = False
         if wifi.radio.connected and requests is not None:
