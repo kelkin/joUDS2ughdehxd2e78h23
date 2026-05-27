@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.1.5"
+LOCAL_VERSION = "2.1.7"
 
 # --- Imports ---
 import ssl
@@ -174,25 +174,22 @@ NY511_URL = "https://511ny.org/api/getmessagesigns?format=json&key=" + secrets["
 ENABLE_OTA   = secrets.get("enable_ota", False)
 MANIFEST_URL = secrets.get("github_version_url", "")
 
-# Hardware geometry — read from secrets.py so multi-panel setups work correctly.
-# For a 3x 64x32 panel setup: width=192, height=32, depth=4
-width               = int(secrets.get("width", 64))
-height              = int(secrets.get("height", 32))
-bit_depth           = int(secrets.get("depth", 4))
-matrix_debug        = bool(secrets.get("matrix_debug", False))
-characters_per_line = 10
-
 # --- settings.json — all user-configurable values ---
 # secrets.py only holds ssid/password/ny511key.
 # Everything else lives here and is editable via the web UI.
 SETTINGS_FILE = "settings.json"
 
 _default_settings = {
-    "color_order":          "RGB",       # Hardware pixel order
-    "sign_text_color":      "#F7B500",   # Road sign yellow (hex string)
-    "name_display_seconds": 3,           # Seconds to show sign name
-    "msg_display_seconds":  10,          # Seconds to show sign message
-    "cycle_sleep_seconds":  30,          # Seconds between API refresh cycles
+    "color_order":          "RGB",   # Hardware pixel order
+    "sign_text_color":      "#F7B500",  # Road sign yellow
+    "name_display_seconds": 3,
+    "msg_display_seconds":  10,
+    "cycle_sleep_seconds":  30,
+    "width":                192,     # Total display width in pixels (64 x num panels)
+    "height":               32,      # Display height in pixels
+    "depth":                6,       # Bit depth (color quality)
+    "matrix_debug":         False,   # Enable MatrixPortal debug output
+    "characters_per_line":  30,      # Text wrapping width
 }
 
 def load_settings():
@@ -231,11 +228,17 @@ def hex_to_int(hex_str):
         return 0xF7B500  # fallback to sign yellow
 
 settings = load_settings()
-color_order      = settings.get("color_order", "RGB")
-sign_text_color  = hex_to_int(settings.get("sign_text_color", "#F7B500"))
-name_disp_secs   = int(settings.get("name_display_seconds", 3))
-msg_disp_secs    = int(settings.get("msg_display_seconds", 10))
-cycle_sleep_secs = int(settings.get("cycle_sleep_seconds", 30))
+# All runtime values read from settings (loaded above)
+color_order         = settings.get("color_order", "RGB")
+sign_text_color     = hex_to_int(settings.get("sign_text_color", "#F7B500"))
+name_disp_secs      = int(settings.get("name_display_seconds", 3))
+msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
+cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
+characters_per_line = int(settings.get("characters_per_line", 30))
+width               = int(settings.get("width", 192))
+height              = int(settings.get("height", 32))
+bit_depth           = int(settings.get("depth", 6))
+matrix_debug        = bool(settings.get("matrix_debug", False))
 print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color)
       + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
       + "s cycle=" + str(cycle_sleep_secs) + "s")
