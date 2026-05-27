@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.1.7"
+LOCAL_VERSION = "2.1.8"
 
 # --- Imports ---
 import ssl
@@ -1182,23 +1182,51 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", body=body)
 
-        # ── POST /calibrate — Light panels, show color picker ─────────────
+        # ── POST /calibrate — Light panels with numbers, show color picker ──
         @server.route("/calibrate", "POST")
         def route_calibrate(request):
             global _calib_state
             _calib_state["active"] = True
             try:
                 import displayio
+
+                # 5x7 pixel digit bitmaps for 1, 2, 3
+                # Each is a list of (col, row) pixel offsets to SET (foreground)
+                DIGITS = {
+                    "1": [(2,0),(1,1),(2,1),(2,2),(2,3),(2,4),(2,5),(2,6)],
+                    "2": [(1,0),(2,0),(3,0),(0,1),(3,1),(3,2),(2,3),(1,4),(0,5),(0,6),(1,6),(2,6),(3,6)],
+                    "3": [(0,0),(1,0),(2,0),(3,0),(3,1),(3,2),(1,2),(2,2),(3,3),(3,4),(0,5),(3,5),(1,6),(2,6)],
+                }
+
                 display = matrixportal.display
-                bmp = displayio.Bitmap(width, height, 3)
-                pal = displayio.Palette(3)
-                pal[0] = 0x330000
-                pal[1] = 0x003300
-                pal[2] = 0x000033
                 panel_w = width // 3
+
+                # 4 palette entries: bg colors + white for digit
+                # 0=dim red, 1=dim green, 2=dim blue, 3=white digit
+                bmp = displayio.Bitmap(width, height, 4)
+                pal = displayio.Palette(4)
+                pal[0] = 0x330000  # dim red   — panel 1
+                pal[1] = 0x003300  # dim green — panel 2
+                pal[2] = 0x000033  # dim blue  — panel 3
+                pal[3] = 0x555555  # dim white — digit pixels (20% brightness)
+
+                # Fill panel background colors
                 for y in range(height):
                     for x in range(width):
                         bmp[x, y] = 0 if x < panel_w else (1 if x < panel_w * 2 else 2)
+
+                # Draw digit for each panel, centered within that panel
+                for panel_idx, digit in enumerate(["1", "2", "3"]):
+                    panel_start_x = panel_idx * panel_w
+                    # Center the 5x7 digit within the 64x32 panel
+                    digit_x = panel_start_x + (panel_w - 5) // 2
+                    digit_y = (height - 7) // 2
+                    for (dx, dy) in DIGITS[digit]:
+                        px = digit_x + dx
+                        py = digit_y + dy
+                        if 0 <= px < width and 0 <= py < height:
+                            bmp[px, py] = 3  # white digit pixel
+
                 tg = displayio.TileGrid(bmp, pixel_shader=pal)
                 splash = displayio.Group()
                 splash.append(tg)
@@ -1208,9 +1236,10 @@ if HAS_HTTPSERVER and pool is not None:
                 print(f"Calibration display error: {disp_err}")
                 log_exception(disp_err)
 
+            # Web UI — panels now labeled P1/P2/P3 to match numbers on display
             rows = ""
-            panels = [("Left","R","330000"),("Middle","G","003300"),("Right","B","000033")]
-            for name, sent, swatch in panels:
+            panels = [("P1","R","330000","1"),("P2","G","003300","2"),("P3","B","000033","3")]
+            for name, sent, swatch, num in panels:
                 btns = ""
                 for c, lbl, cls in [("R","Red","btn-red"),("G","Green","btn-green"),("B","Blue","btn-blue")]:
                     btns += (
@@ -1218,9 +1247,11 @@ if HAS_HTTPSERVER and pool is not None:
                         "onclick=\"pick('" + name + "','" + c + "',this)\">" + lbl + "</button>"
                     )
                 rows += (
-                    "<td><div class=\"swatch\" style=\"background:#" + swatch + "\"></div>"
-                    "<strong>" + name + " Panel</strong><br>"
-                    "<small style=\"color:#888\">Sent: " + sent + "</small><br><br>"
+                    "<td>"
+                    "<div class=\"swatch\" style=\"background:#" + swatch + ";"
+                    "font-size:28px;font-weight:bold;color:#aaa;line-height:60px;\">" + num + "</div>"
+                    "<strong>Panel " + num + "</strong><br>"
+                    "<small style=\"color:#888\">Board sent: " + sent + "</small><br><br>"
                     + btns +
                     "<div id=\"sel_" + name + "\" style=\"margin-top:6px;color:#ffaa00;\"></div></td>"
                 )
@@ -1230,12 +1261,14 @@ if HAS_HTTPSERVER and pool is not None:
                 "<body>" + html_nav("settings") +
                 "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
                 "<div class=\"card\">"
-                "<p style=\"color:#aaa\">Look at your display. Each third should be lit a dim "
-                "color. Click the color you <strong>actually see</strong> for each panel.</p>"
+                "<p style=\"color:#aaa\">Your display now shows each panel lit a dim color "
+                "with its panel number (1, 2, 3). "
+                "For each numbered panel, click the color you "
+                "<strong>actually see</strong> on that panel below.</p>"
                 "<form method=\"POST\" action=\"/calibrate-result\" id=\"calform\">"
-                "<input type=\"hidden\" name=\"left\" id=\"v_Left\">"
-                "<input type=\"hidden\" name=\"mid\" id=\"v_Middle\">"
-                "<input type=\"hidden\" name=\"right\" id=\"v_Right\">"
+                "<input type=\"hidden\" name=\"p1\" id=\"v_P1\">"
+                "<input type=\"hidden\" name=\"p2\" id=\"v_P2\">"
+                "<input type=\"hidden\" name=\"p3\" id=\"v_P3\">"
                 "<table class=\"calib\"><tr>" + rows + "</tr></table><br>"
                 "<button class=\"btn-green\" type=\"submit\" id=\"applybtn\" disabled "
                 "style=\"font-size:1.1em;padding:10px 30px;\">&#x2713; Apply Color Order</button>"
@@ -1252,7 +1285,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "for(var i=0;i<btns.length;i++){btns[i].style.opacity='0.4';}"
                 "btn.style.opacity='1';btn.style.outline='2px solid #fff';"
                 "document.getElementById('sel_'+panel).textContent='Selected: '+color;"
-                "if(picks['Left']&&picks['Middle']&&picks['Right']){"
+                "if(picks['P1']&&picks['P2']&&picks['P3']){"
                 "document.getElementById('applybtn').disabled=false;}}"
                 "</script>"
                 "</body></html>"
@@ -1270,15 +1303,18 @@ if HAS_HTTPSERVER and pool is not None:
                 pass
             try:
                 p = parse_post_body(request)
-                left  = p.get("left",  "R").upper()
-                mid   = p.get("mid",   "G").upper()
-                right = p.get("right", "B").upper()
-                order_str = left + mid + right
+                p1 = p.get("p1", "R").upper()
+                p2 = p.get("p2", "G").upper()
+                p3 = p.get("p3", "B").upper()
+                # Board sent P1=R, P2=G, P3=B.
+                # User reports what they see on each numbered panel.
+                # Concatenating gives the correct color_order string.
+                order_str = p1 + p2 + p3
                 if order_str not in VALID_COLOR_ORDERS:
                     raise ValueError("Invalid order: " + order_str)
                 settings["color_order"] = order_str
                 ok = save_settings(settings)
-                print(f"Calibration: L={left} M={mid} R={right} -> {order_str} saved={ok}")
+                print(f"Calibration: P1={p1} P2={p2} P3={p3} -> {order_str} saved={ok}")
                 status = ("Color order set to <strong>" + order_str + "</strong>. " +
                           ("Saved! Reboot to apply." if ok else "Save failed."))
                 cls = "status-ok" if ok else "status-err"
