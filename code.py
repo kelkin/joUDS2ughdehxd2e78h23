@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.4"
+LOCAL_VERSION = "2.2.5"
 
 # --- Imports ---
 import ssl
@@ -1090,24 +1090,32 @@ if HAS_HTTPSERVER and pool is not None:
             cached = load_signs_cache()
             favs   = set(load_favourite_signs())
             cache_count = len(cached)
+            w.feed()
 
             if cached:
-                # Build checkbox list sorted alphabetically, favourites first
+                # Build checkbox list in chunks of 50, feeding watchdog between chunks
                 fav_items   = sorted([s for s in cached if s in favs])
                 other_items = sorted([s for s in cached if s not in favs])
                 all_items   = fav_items + other_items
+                w.feed()
 
-                items_html = ""
-                for name in all_items:
+                items_parts = []
+                for i, name in enumerate(all_items):
+                    if i % 50 == 0:
+                        w.feed()  # Feed watchdog every 50 items
                     checked = " checked" if name in favs else ""
                     fav_cls = " fav" if name in favs else ""
                     safe_name = (name.replace("&","&amp;").replace("<","&lt;")
                                      .replace(">","&gt;").replace("\"","&quot;"))
-                    items_html += (
+                    items_parts.append(
                         "<div class=\"sign-item" + fav_cls + "\">"
                         "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
                         safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
                     )
+                items_html = "".join(items_parts)
+                items_parts = None
+                w.feed()
+                gc.collect()
 
                 sign_section = (
                     "<p style=\"color:#aaa\">" + str(cache_count) +
@@ -1136,6 +1144,7 @@ if HAS_HTTPSERVER and pool is not None:
                     "Click Refresh to load signs from NY511.</p>"
                 )
 
+            w.feed()
             body = (
                 html_head("Traffic Signs") +
                 "<body>" + html_nav("signs") +
@@ -1150,6 +1159,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"card\">" + sign_section + "</div>"
                 "</body></html>"
             )
+            w.feed()
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
         # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
@@ -1514,3 +1524,4 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
+
