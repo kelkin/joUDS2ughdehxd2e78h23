@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.5"
+LOCAL_VERSION = "2.2.6"
 
 # --- Imports ---
 import ssl
@@ -1036,16 +1036,27 @@ if HAS_HTTPSERVER and pool is not None:
             global sign_text_color, name_disp_secs, msg_disp_secs, cycle_sleep_secs
             try:
                 p = parse_post_body(request)
-                new_order = p.get("color_order", "RGB").upper()
+                print("POST params: " + str(p))  # Debug — remove after confirming
+
+                new_order = p.get("color_order", settings.get("color_order", "RGB")).upper()
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
-                new_color = p.get("sign_text_color", "#F7B500")
-                if not new_color.startswith("#"):
-                    new_color = "#F7B500"
 
-                new_name_secs  = hms_to_secs(p.get("name_h",0), p.get("name_m",0), p.get("name_s",3))
-                new_msg_secs   = hms_to_secs(p.get("msg_h",0),  p.get("msg_m",0),  p.get("msg_s",10))
-                new_cycle_secs = hms_to_secs(p.get("cycle_h",0),p.get("cycle_m",0),p.get("cycle_s",30))
+                new_color = p.get("sign_text_color", settings.get("sign_text_color", "#F7B500"))
+                if not new_color.startswith("#"):
+                    new_color = "#" + new_color  # Some browsers omit the #
+
+                # Use current values as defaults so missing fields don't reset to 0
+                cur_n_h, cur_n_m, cur_n_s = secs_to_hms(name_disp_secs)
+                cur_m_h, cur_m_m, cur_m_s = secs_to_hms(msg_disp_secs)
+                cur_c_h, cur_c_m, cur_c_s = secs_to_hms(cycle_sleep_secs)
+
+                new_name_secs  = hms_to_secs(
+                    p.get("name_h", cur_n_h), p.get("name_m", cur_n_m), p.get("name_s", cur_n_s))
+                new_msg_secs   = hms_to_secs(
+                    p.get("msg_h", cur_m_h),  p.get("msg_m", cur_m_m),  p.get("msg_s", cur_m_s))
+                new_cycle_secs = hms_to_secs(
+                    p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
@@ -1055,7 +1066,7 @@ if HAS_HTTPSERVER and pool is not None:
 
                 ok = save_settings(settings)
 
-                # Apply timing changes immediately (no reboot needed)
+                # Apply non-color-order changes immediately (no reboot needed)
                 name_disp_secs   = new_name_secs
                 msg_disp_secs    = new_msg_secs
                 cycle_sleep_secs = new_cycle_secs
