@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.21"
+LOCAL_VERSION = "2.2.22"
 
 # --- Imports ---
 import ssl
@@ -1294,7 +1294,6 @@ if HAS_HTTPSERVER and pool is not None:
             page_items  = all_items[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
 
             items_parts = []
-            msg_parts   = ["var MSGS={"]
             for i, sign in enumerate(page_items):
                 if i % 25 == 0:
                     w.feed()
@@ -1312,19 +1311,11 @@ if HAS_HTTPSERVER and pool is not None:
                     "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
                     safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
                 )
-                if messages:
-                    preview = " / ".join(
-                        str(m).replace("\n"," | ").replace("'","\\'")
-                        for m in messages if m)
-                else:
-                    preview = "NO MESSAGE"
-                msg_parts.append("'" + js_safe + "':'" + preview + "',")
+                # messages fetched on-demand via /sign-preview
             w.feed()
 
             items_html = "".join(items_parts)
-            msg_js     = "".join(msg_parts) + "}"
             items_parts = None
-            msg_parts   = None
             gc.collect()
 
             # Build pagination controls
@@ -1390,27 +1381,54 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;word-break:break-word\"></div>"
                 "</div></div>"
                 + pagination +
-                "<script>" + msg_js +
-                "var CUR_Q=" + json.dumps(query) + ";"
-                "function goPage(p){"
-                "var fd=new FormData();"
-                "fd.append('p',p);fd.append('q',CUR_Q);"
-                "fetch('/signs-page',{method:'POST',body:fd})"
-                ".then(function(){window.location='/signs';});}"
-                "function selectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
-                ".forEach(function(b){b.checked=true;});}"
-                "function deselectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
-                ".forEach(function(b){b.checked=false;});}"
-                "function showPreview(n){var m=MSGS[n]||'No data';"
-                "document.getElementById('pvname').textContent=n;"
-                "document.getElementById('pvmsg').textContent=m.split(' / ').join('\\n').split(' | ').join('\\n');"
-                "document.getElementById('pvpanel').style.display='block';}"
-                "function hidePreview(){document.getElementById('pvpanel').style.display='none';}"
-                "</script>"
+                "<script>""var CUR_Q=document.body.getAttribute('data-q')||'';""function goPage(p){""var b='p='+p+'&q='+encodeURIComponent(CUR_Q);""fetch('/signs-page',{method:'POST',""headers:{'Content-Type':'application/x-www-form-urlencoded'},""body:b}).then(function(){window.location='/signs';});}""function selectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=true;});}""function deselectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=false;});}""function showPreview(n){""fetch('/sign-preview?n='+encodeURIComponent(n))"".then(function(r){return r.text();})"".then(function(t){""document.getElementById('pvname').textContent=n;""document.getElementById('pvmsg').textContent=t;""document.getElementById('pvpanel').style.display='block';});}""function hidePreview(){""document.getElementById('pvpanel').style.display='none';}""</script>"
                 "</div></body></html>"
             )
             w.feed()
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /sign-preview — Return message text for a sign (hover preview)
+        @server.route("/sign-preview", GET)
+        def route_sign_preview(request):
+            # Extract sign name from query string manually
+            name = ""
+            try:
+                qs = ""
+                if hasattr(request, "query_string"):
+                    qs = request.query_string
+                    if isinstance(qs, bytes):
+                        qs = qs.decode("utf-8")
+                for part in qs.split("&"):
+                    if part.startswith("n="):
+                        name = part[2:]
+                        # Basic URL decode
+                        name = name.replace("+", " ").replace("%20", " ")
+                        for code, char in [("%28","("),("%29",")"),("%5B","["),
+                                           ("%5D","]"),("%2D","-"),("%2C",","),
+                                           ("%3A",":"),("%2F","/"),("%2E",".")]:
+                            name = name.replace(code, char).replace(code.lower(), char)
+                        break
+            except Exception:
+                pass
+
+            # Look up messages in cache
+            result = "No message data"
+            if name:
+                try:
+                    cached = load_signs_cache()
+                    for sign in cached:
+                        if sign["name"] == name:
+                            msgs = sign.get("messages", [])
+                            if msgs:
+                                result = "\n".join(
+                                    str(m).replace("\\n", "\n") for m in msgs if m)
+                            else:
+                                result = "NO MESSAGE"
+                            break
+                except Exception as e:
+                    result = "Error: " + str(e)
+            return Response(request, content_type="text/plain",
+                          headers={"Connection": "close"}, body=result)
 
         # ── POST /signs-search — Set filter state and redirect to /signs ──
         @server.route("/signs-search", "POST")
@@ -1445,7 +1463,7 @@ if HAS_HTTPSERVER and pool is not None:
             print("NY511 cache refresh queued — will run on next main loop cycle.")
             body = (
                 html_head("Refreshing Signs...") +
-                "<body>" + html_nav("signs") +
+                "<body data-q=\"" + query + "\">" + html_nav("signs") +
                 "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
                 "<div class=\"card\">"
                 "<p style=\"color:#ffaa00\">&#x23F3; Fetching signs from NY511...</p>"
