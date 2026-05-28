@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.18"
+LOCAL_VERSION = "2.2.19"
 
 # --- Imports ---
 import ssl
@@ -1262,100 +1262,101 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── GET /signs — Traffic Signs page ───────────────────────────────
+        # ── GET /signs — Traffic Signs page (paginated, 50 per page) ───────
         @server.route("/signs", GET)
         def route_signs(request):
-            cached = load_signs_cache()  # list of {"name":str, "messages":[...]}
+            # Parse page number and filter from query string
+            query = ""
+            page  = 0
+            try:
+                qs = request.query_string if hasattr(request, "query_string") else ""
+                if isinstance(qs, bytes):
+                    qs = qs.decode("utf-8")
+                for part in qs.split("&"):
+                    if part.startswith("p="):
+                        page = int(part[2:])
+                    elif part.startswith("q="):
+                        query = part[2:].replace("+", " ").replace("%20", " ").lower()
+            except Exception:
+                pass
+
+            cached = load_signs_cache()
             favs   = set(load_favorite_signs())
-            cache_count = len(cached)
             w.feed()
 
-            if cached:
+            # Filter by query if present
+            if query:
+                all_items = [s for s in cached if query in s["name"].lower()]
+            else:
                 fav_items   = sorted([s for s in cached if s["name"] in favs],
                                      key=lambda s: s["name"])
                 other_items = sorted([s for s in cached if s["name"] not in favs],
                                      key=lambda s: s["name"])
                 all_items   = fav_items + other_items
-                w.feed()
-
-                items_parts = []
-                msg_parts   = ["var MSGS={"]
-                for i, sign in enumerate(all_items):
-                    if i % 50 == 0:
-                        w.feed()
-                    name     = sign["name"]
-                    messages = sign.get("messages", [])
-                    checked  = " checked" if name in favs else ""
-                    fav_cls  = " fav" if name in favs else ""
-                    safe_name = (name.replace("&","&amp;").replace("<","&lt;")
-                                     .replace(">","&gt;").replace("\"","&quot;"))
-                    js_safe  = name.replace("\\","\\\\").replace("'","\\'")
-                    items_parts.append(
-                        "<div class=\"sign-item" + fav_cls + "\" "
-                        "onmouseenter=\"showPreview('" + js_safe + "')\" "
-                        "onmouseleave=\"hidePreview()\">"
-                        "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
-                        safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
-                    )
-                    if messages:
-                        preview = " / ".join(
-                            str(m).replace("\n"," | ").replace("'","\\'")
-                            for m in messages if m)
-                    else:
-                        preview = "NO MESSAGE"
-                    msg_parts.append("'" + js_safe + "':'" + preview + "',")
-
-                items_html = "".join(items_parts)
-                msg_js     = "".join(msg_parts) + "}"
-                items_parts = None
-                msg_parts   = None
-                w.feed()
-                gc.collect()
-
-                sign_section = (
-                    "<p style=\"color:#aaa\">" + str(cache_count) +
-                    " signs cached. Favorites in <span style=\"color:#F7B500\">yellow</span>. "
-                    "Hover a sign to preview messages.</p>"
-                    "<div style=\"display:flex;gap:12px;align-items:flex-start\">"
-                    "<div style=\"flex:1;min-width:0\">"
-                    "<input type=\"text\" id=\"sign-filter\" placeholder=\"Filter signs...\" "
-                    "oninput=\"filterSigns(this.value)\" style=\"width:100%;"
-                    "margin-bottom:8px;padding:8px;background:#222;color:#eee;"
-                    "border:1px solid #555;border-radius:4px;font-family:monospace;\">"
-                    "<div style=\"margin-bottom:8px\">"
-                    "<button class=\"btn-gray\" type=\"button\" onclick=\"selectAll()\">&#x2611; Select All</button>"
-                    " <button class=\"btn-gray\" type=\"button\" onclick=\"deselectAll()\">&#x2610; Deselect All</button>"
-                    "</div>"
-                    "<form method=\"POST\" action=\"/save-signs\">"
-                    "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
-                    "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favorites</button>"
-                    "</form></div>"
-                    "<div id=\"pvpanel\" style=\"width:200px;flex-shrink:0;background:#0a0a0a;"
-                    "border:1px solid #333;border-radius:6px;padding:10px;display:none;"
-                    "position:sticky;top:10px;\">"
-                    "<div style=\"color:#ffaa00;font-weight:bold;margin-bottom:6px;font-size:0.85em\">Preview</div>"
-                    "<div id=\"pvname\" style=\"color:#00ccff;font-size:0.78em;margin-bottom:6px;word-break:break-word\"></div>"
-                    "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;word-break:break-word\"></div>"
-                    "</div></div>"
-                    "<script>" + msg_js +
-                    "function filterSigns(q){q=q.toLowerCase();"
-                    "document.querySelectorAll('.sign-item').forEach(function(el){"
-                    "el.style.display=el.textContent.toLowerCase().includes(q)?'':'none';});}"
-                    "function selectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
-                    ".forEach(function(b){b.checked=true;});}"
-                    "function deselectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
-                    ".forEach(function(b){b.checked=false;});}"
-                    "function showPreview(n){var m=MSGS[n]||'No data';"
-                    "document.getElementById('pvname').textContent=n;"
-                    "document.getElementById('pvmsg').textContent=m.replace(/ \/ /g,'\n').replace(/ \| /g,'\n');"
-                    "document.getElementById('pvpanel').style.display='block';}"
-                    "function hidePreview(){document.getElementById('pvpanel').style.display='none';}"
-                    "</script>"
-                )
-            else:
-                sign_section = "<p style=\"color:#aaa\">No sign cache found. Click Refresh to load signs from NY511.</p>"
-
             w.feed()
+
+            PAGE_SIZE   = 50
+            total       = len(all_items)
+            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            page        = max(0, min(page, total_pages - 1))
+            page_items  = all_items[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+            items_parts = []
+            msg_parts   = ["var MSGS={"]
+            for i, sign in enumerate(page_items):
+                if i % 25 == 0:
+                    w.feed()
+                name     = sign["name"]
+                messages = sign.get("messages", [])
+                checked  = " checked" if name in favs else ""
+                fav_cls  = " fav" if name in favs else ""
+                safe_name = (name.replace("&","&amp;").replace("<","&lt;")
+                                 .replace(">","&gt;").replace("\"","&quot;"))
+                js_safe  = name.replace("\\","\\\\").replace("'","\\'")
+                items_parts.append(
+                    "<div class=\"sign-item" + fav_cls + "\" "
+                    "onmouseenter=\"showPreview('" + js_safe + "')\" "
+                    "onmouseleave=\"hidePreview()\">"
+                    "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
+                    safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
+                )
+                if messages:
+                    preview = " / ".join(
+                        str(m).replace("\n"," | ").replace("'","\\'")
+                        for m in messages if m)
+                else:
+                    preview = "NO MESSAGE"
+                msg_parts.append("'" + js_safe + "':'" + preview + "',")
+            w.feed()
+
+            items_html = "".join(items_parts)
+            msg_js     = "".join(msg_parts) + "}"
+            items_parts = None
+            msg_parts   = None
+            gc.collect()
+
+            # Build pagination controls
+            q_param = "&q=" + query if query else ""
+            def page_btn(p, label, disabled=False):
+                if disabled:
+                    return ("<button class=\"btn-gray\" disabled style=\"opacity:0.4\">"
+                            + label + "</button> ")
+                return ("<a href=\"/signs?p=" + str(p) + q_param + "\">"
+                        "<button class=\"btn-gray\">" + label + "</button></a> ")
+
+            pagination = (
+                "<div style=\"margin:8px 0;color:#aaa;font-size:0.85em\">"
+                "Showing " + str(page * PAGE_SIZE + 1) + "–" +
+                str(min((page + 1) * PAGE_SIZE, total)) + " of " + str(total) +
+                " signs &nbsp;"
+                + page_btn(0, "&#x23EE;", page == 0)
+                + page_btn(page - 1, "&#x25C0; Prev", page == 0)
+                + page_btn(page + 1, "Next &#x25B6;", page >= total_pages - 1)
+                + page_btn(total_pages - 1, "&#x23ED;", page >= total_pages - 1)
+                + "</div>"
+            )
+            w.feed()
+
             body = (
                 html_head("Traffic Signs") +
                 "<body>" + html_nav("signs") +
@@ -1366,10 +1367,63 @@ if HAS_HTTPSERVER and pool is not None:
                 "</form>"
                 "<span style=\"color:#888;margin-left:15px;font-size:0.9em\">Fetches ~930 signs. Takes 15-20 seconds.</span>"
                 "</div>"
-                "<div class=\"card\">" + sign_section + "</div>"
-                "</body></html>"
+                "<div class=\"card\">" +
+                ("<p style=\"color:#aaa\">" + str(len(cached)) +
+                 " signs cached. Favorites in <span style=\"color:#F7B500\">yellow</span>. "
+                 "Hover a sign to preview messages.</p>"
+                 if cached else
+                 "<p style=\"color:#aaa\">No sign cache. Click Refresh to load from NY511.</p>") +
+                "<form method=\"POST\" action=\"/signs-search\">"
+                "<input type=\"text\" name=\"q\" value=\"" + query + "\" "
+                "placeholder=\"Filter signs...\" "
+                "style=\"width:100%;margin-bottom:8px;padding:8px;background:#222;"
+                "color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;\">"
+                "<button class=\"btn-gray\" type=\"submit\">&#x1F50D; Search</button>"
+                "</form><br>"
+                "<div style=\"margin-bottom:8px\">"
+                "<button class=\"btn-gray\" type=\"button\" onclick=\"selectAll()\">&#x2611; Select All</button>"
+                " <button class=\"btn-gray\" type=\"button\" onclick=\"deselectAll()\">&#x2610; Deselect All</button>"
+                "</div>"
+                + pagination +
+                "<div style=\"display:flex;gap:12px;align-items:flex-start\">"
+                "<div style=\"flex:1;min-width:0\">"
+                "<form method=\"POST\" action=\"/save-signs\">"
+                "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
+                "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favorites</button>"
+                "</form></div>"
+                "<div id=\"pvpanel\" style=\"width:200px;flex-shrink:0;background:#0a0a0a;"
+                "border:1px solid #333;border-radius:6px;padding:10px;display:none;"
+                "position:sticky;top:10px;\">"
+                "<div style=\"color:#ffaa00;font-weight:bold;margin-bottom:6px;font-size:0.85em\">Preview</div>"
+                "<div id=\"pvname\" style=\"color:#00ccff;font-size:0.78em;margin-bottom:6px;word-break:break-word\"></div>"
+                "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;word-break:break-word\"></div>"
+                "</div></div>"
+                + pagination +
+                "<script>" + msg_js +
+                "function selectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
+                ".forEach(function(b){b.checked=true;});}"
+                "function deselectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
+                ".forEach(function(b){b.checked=false;});}"
+                "function showPreview(n){var m=MSGS[n]||'No data';"
+                "document.getElementById('pvname').textContent=n;"
+                "document.getElementById('pvmsg').textContent=m.split(' / ').join('\\n').split(' | ').join('\\n');"
+                "document.getElementById('pvpanel').style.display='block';}"
+                "function hidePreview(){document.getElementById('pvpanel').style.display='none';}"
+                "</script>"
+                "</div></body></html>"
             )
+            w.feed()
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── POST /signs-search — Redirect to filtered signs page ─────────
+        @server.route("/signs-search", "POST")
+        def route_signs_search(request):
+            p = parse_post_body(request)
+            q = p.get("q", "").strip()
+            location = "/signs?q=" + q.replace(" ", "+") if q else "/signs"
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": location, "Connection": "close"},
+                          body="")
 
                 # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
         # Returns immediately to the browser to avoid watchdog timeout.
@@ -1944,3 +1998,4 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
+
