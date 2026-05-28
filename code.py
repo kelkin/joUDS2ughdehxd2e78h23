@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.20"
+LOCAL_VERSION = "2.2.21"
 
 # --- Imports ---
 import ssl
@@ -1332,11 +1332,8 @@ if HAS_HTTPSERVER and pool is not None:
                 if disabled:
                     return ("<button class=\"btn-gray\" disabled style=\"opacity:0.4\">"
                             + label + "</button> ")
-                return ("<form method=\"POST\" action=\"/signs-page\" style=\"display:inline\">"
-                        "<input type=\"hidden\" name=\"p\" value=\"" + str(p) + "\">"
-                        "<input type=\"hidden\" name=\"q\" value=\"" + query + "\">"
-                        "<button class=\"btn-gray\" type=\"submit\">" + label + "</button>"
-                        "</form> ")
+                return ("<button class=\"btn-gray\" type=\"button\" "
+                        "onclick=\"goPage(" + str(p) + ")\">" + label + "</button> ")
 
             pagination = (
                 "<div style=\"margin:8px 0;color:#aaa;font-size:0.85em\">"
@@ -1394,6 +1391,12 @@ if HAS_HTTPSERVER and pool is not None:
                 "</div></div>"
                 + pagination +
                 "<script>" + msg_js +
+                "var CUR_Q=" + json.dumps(query) + ";"
+                "function goPage(p){"
+                "var fd=new FormData();"
+                "fd.append('p',p);fd.append('q',CUR_Q);"
+                "fetch('/signs-page',{method:'POST',body:fd})"
+                ".then(function(){window.location='/signs';});}"
                 "function selectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
                 ".forEach(function(b){b.checked=true;});}"
                 "function deselectAll(){document.querySelectorAll('#signlist input[type=checkbox]')"
