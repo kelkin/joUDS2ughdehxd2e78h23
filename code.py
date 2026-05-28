@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.23"
+LOCAL_VERSION = "2.2.24"
 
 # --- Imports ---
 import ssl
@@ -1458,7 +1458,7 @@ if HAS_HTTPSERVER and pool is not None:
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
 
-                # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
+        # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
         # Returns immediately to the browser to avoid watchdog timeout.
         # The actual fetch is done by the main loop on the next cycle.
         @server.route("/refresh-signs-cache", "POST")
@@ -1467,7 +1467,7 @@ if HAS_HTTPSERVER and pool is not None:
             print("NY511 cache refresh queued — will run on next main loop cycle.")
             body = (
                 html_head("Refreshing Signs...") +
-                "<body data-q=\"" + query + "\">" + html_nav("signs") +
+                "<body>" + html_nav("signs") +
                 "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
                 "<div class=\"card\">"
                 "<p style=\"color:#ffaa00\">&#x23F3; Fetching signs from NY511...</p>"
