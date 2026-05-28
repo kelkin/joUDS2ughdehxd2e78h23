@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.24"
+LOCAL_VERSION = "2.2.26"
 
 # --- Imports ---
 import ssl
@@ -1264,19 +1264,14 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── GET /signs — Traffic Signs page (paginated, 50 per page) ───────
+        # ── GET /signs — Traffic Signs page ───────────────────────────────
         @server.route("/signs", GET)
         def route_signs(request):
-            # Read search filter and page from module-level state
-            # (avoids query string parsing which is unreliable in this library version)
-            query = _signs_filter[0]
-            page  = _signs_page[0]
-
+            query  = _signs_filter[0]
             cached = load_signs_cache()
             favs   = set(load_favorite_signs())
             w.feed()
 
-            # Filter by query if present
             if query:
                 all_items = [s for s in cached if query in s["name"].lower()]
             else:
@@ -1287,178 +1282,96 @@ if HAS_HTTPSERVER and pool is not None:
                 all_items   = fav_items + other_items
             w.feed()
 
-            PAGE_SIZE   = 50
-            total       = len(all_items)
-            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-            page        = max(0, min(page, total_pages - 1))
-            page_items  = all_items[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
-
             items_parts = []
-            for i, sign in enumerate(page_items):
-                if i % 25 == 0:
+            for i, sign in enumerate(all_items):
+                if i % 50 == 0:
                     w.feed()
                 name     = sign["name"]
-                messages = sign.get("messages", [])
                 checked  = " checked" if name in favs else ""
                 fav_cls  = " fav" if name in favs else ""
                 safe_name = (name.replace("&","&amp;").replace("<","&lt;")
-                                 .replace(">","&gt;").replace("\"","&quot;"))
-                js_safe  = name.replace("\\","\\\\").replace("'","\\'")
+                                 .replace(">","&gt;").replace('"',"&quot;"))
+                msgs = sign.get("messages", [])
+                if msgs:
+                    tip = " | ".join(str(m).replace('"',"'") for m in msgs if m)[:200]
+                else:
+                    tip = "No message"
                 items_parts.append(
-                    "<div class=\"sign-item" + fav_cls + "\" "
-                    "onmouseenter=\"showPreview('" + js_safe + "')\" "
-                    "onmouseleave=\"hidePreview()\">"
-                    "<label><input type=\"checkbox\" name=\"fav\" value=\"" +
-                    safe_name + "\"" + checked + "> " + safe_name + "</label></div>"
+                    '<div class="sign-item' + fav_cls + '" title="' + tip + '">'
+                    '<label><input type="checkbox" name="fav" value="' +
+                    safe_name + '"' + checked + '> ' + safe_name + '</label></div>'
                 )
-                # messages fetched on-demand via /sign-preview
-            w.feed()
-
             items_html = "".join(items_parts)
             items_parts = None
-            gc.collect()
-
-            # Build pagination controls
-            def page_btn(p, label, disabled=False):
-                if disabled:
-                    return ("<button class=\"btn-gray\" disabled style=\"opacity:0.4\">"
-                            + label + "</button> ")
-                return ("<button class=\"btn-gray\" type=\"button\" "
-                        "onclick=\"goPage(" + str(p) + ")\">" + label + "</button> ")
-
-            pagination = (
-                "<div style=\"margin:8px 0;color:#aaa;font-size:0.85em\">"
-                "Showing " + str(page * PAGE_SIZE + 1) + "&ndash;" +
-                str(min((page + 1) * PAGE_SIZE, total)) + " of " + str(total) +
-                " signs &nbsp;"
-                + page_btn(0, "&#x23EE;", page == 0)
-                + page_btn(page - 1, "&#x25C0; Prev", page == 0)
-                + page_btn(page + 1, "Next &#x25B6;", page >= total_pages - 1)
-                + page_btn(total_pages - 1, "&#x23ED;", page >= total_pages - 1)
-                + "</div>"
-            )
             w.feed()
+            gc.collect()
 
             body = (
                 html_head("Traffic Signs") +
                 "<body>" + html_nav("signs") +
                 "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
-                "<div class=\"card\">"
-                "<form method=\"POST\" action=\"/refresh-signs-cache\" style=\"display:inline\">"
-                "<button class=\"btn-cyan\" type=\"submit\">&#x1F504; Refresh from NY511</button>"
-                "</form>"
-                "<span style=\"color:#888;margin-left:15px;font-size:0.9em\">Fetches ~930 signs. Takes 15-20 seconds.</span>"
-                "</div>"
-                "<div class=\"card\">" +
-                ("<p style=\"color:#aaa\">" + str(len(cached)) +
-                 " signs cached. Favorites in <span style=\"color:#F7B500\">yellow</span>. "
-                 "Hover a sign to preview messages.</p>"
+                '<div class="card">'
+                '<form method="POST" action="/refresh-signs-cache" style="display:inline">'
+                '<button class="btn-cyan" type="submit">&#x1F504; Refresh from NY511</button>'
+                '</form>'
+                '<span style="color:#888;margin-left:15px;font-size:0.9em">'
+                'Fetches ~930 signs. Takes 15-20 seconds.</span>'
+                '</div>'
+                '<div class="card">' +
+                ('<p style="color:#aaa">' + str(len(cached)) +
+                 ' signs cached. Favorites in <span style="color:#F7B500">yellow</span>. '
+                 'Hover a sign name to see its messages.</p>'
                  if cached else
-                 "<p style=\"color:#aaa\">No sign cache. Click Refresh to load from NY511.</p>") +
-                "<form method=\"POST\" action=\"/signs-search\">"
-                "<input type=\"text\" name=\"q\" value=\"" + query + "\" "
-                "placeholder=\"Filter signs...\" "
-                "style=\"width:100%;margin-bottom:8px;padding:8px;background:#222;"
-                "color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;\">"
-                "<button class=\"btn-gray\" type=\"submit\">&#x1F50D; Search</button>"
-                "</form><br>"
-                "<div style=\"margin-bottom:8px\">"
-                "<button class=\"btn-gray\" type=\"button\" onclick=\"selectAll()\">&#x2611; Select All</button>"
-                " <button class=\"btn-gray\" type=\"button\" onclick=\"deselectAll()\">&#x2610; Deselect All</button>"
-                "</div>"
-                + pagination +
-                "<div style=\"display:flex;gap:12px;align-items:flex-start\">"
-                "<div style=\"flex:1;min-width:0;max-width:calc(100% - 224px)\">"
-                "<form method=\"POST\" action=\"/save-signs\">"
-                "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
-                "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favorites</button>"
-                "</form></div>"
-                "<div id=\"pvpanel\" style=\"width:200px;flex-shrink:0;background:#0a0a0a;"
-                "border:1px solid #333;border-radius:6px;padding:10px;"
-                "position:sticky;top:10px;\">"
-                "<div style=\"color:#ffaa00;font-weight:bold;margin-bottom:6px;font-size:0.85em\">Preview</div>"
-                "<div id=\"pvname\" style=\"color:#00ccff;font-size:0.78em;margin-bottom:6px;"
-                "word-break:break-word\"></div>"
-                "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;"
-                "word-break:break-word;min-height:40px\">"
-                "<span style=\"color:#444;font-size:0.85em\">Hover a sign to preview</span>"
-                "</div>"
-                "</div></div>"
-                + pagination +
-                "<script>""var CUR_Q=document.body.getAttribute('data-q')||'';""function goPage(p){""var b='p='+p+'&q='+encodeURIComponent(CUR_Q);""fetch('/signs-page',{method:'POST',""headers:{'Content-Type':'application/x-www-form-urlencoded'},""body:b}).then(function(){window.location='/signs';});}""function selectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=true;});}""function deselectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=false;});}""function showPreview(n){""fetch('/sign-preview?n='+encodeURIComponent(n))"".then(function(r){return r.text();})"".then(function(t){""document.getElementById('pvname').textContent=n;""document.getElementById('pvmsg').textContent=t;""document.getElementById('pvmsg').textContent=t;});}""function hidePreview(){""document.getElementById('pvname').textContent='';document.getElementById('pvmsg').textContent='Hover a sign to preview';}""</script>"
-                "</div></body></html>"
+                 '<p style="color:#aaa">No sign cache. Click Refresh to load from NY511.</p>') +
+                '<form method="POST" action="/signs-search">'
+                '<input type="text" name="q" value="' + query + '" '
+                'placeholder="Filter signs..." '
+                'style="width:100%;margin-bottom:8px;padding:8px;background:#222;'
+                'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
+                '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
+                ' <a href="/signs-clear"><button class="btn-gray" type="button">&#x2715; Clear</button></a>'
+                '</form><br>'
+                '<div style="margin-bottom:8px">'
+                '<button class="btn-gray" type="button" onclick="selectAll()">&#x2611; Select All</button>'
+                ' <button class="btn-gray" type="button" onclick="deselectAll()">&#x2610; Deselect All</button>'
+                ' <span style="color:#888;margin-left:10px;font-size:0.85em">'
+                + str(len(all_items)) + ' signs shown</span>'
+                '</div>'
+                '<form method="POST" action="/save-signs">'
+                '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
+                '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
+                '</form>'
+                '<script>'
+                'function selectAll(){'
+                'document.querySelectorAll("#signlist input[type=checkbox]")'
+                '.forEach(function(b){b.checked=true;});}'
+                'function deselectAll(){'
+                'document.querySelectorAll("#signlist input[type=checkbox]")'
+                '.forEach(function(b){b.checked=false;});}'
+                '</script>'
+                '</div></body></html>'
             )
             w.feed()
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── GET /sign-preview — Return message text for a sign (hover preview)
-        @server.route("/sign-preview", GET)
-        def route_sign_preview(request):
-            # Extract sign name from query string manually
-            name = ""
-            try:
-                qs = ""
-                if hasattr(request, "query_string"):
-                    qs = request.query_string
-                    if isinstance(qs, bytes):
-                        qs = qs.decode("utf-8")
-                for part in qs.split("&"):
-                    if part.startswith("n="):
-                        name = part[2:]
-                        # Basic URL decode
-                        name = name.replace("+", " ").replace("%20", " ")
-                        for code, char in [("%28","("),("%29",")"),("%5B","["),
-                                           ("%5D","]"),("%2D","-"),("%2C",","),
-                                           ("%3A",":"),("%2F","/"),("%2E",".")]:
-                            name = name.replace(code, char).replace(code.lower(), char)
-                        break
-            except Exception:
-                pass
+        # ── GET /signs-clear — Clear the search filter ────────────────────
+        @server.route("/signs-clear", GET)
+        def route_signs_clear(request):
+            _signs_filter[0] = ""
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
 
-            # Look up messages in cache
-            result = "No message data"
-            if name:
-                try:
-                    cached = load_signs_cache()
-                    for sign in cached:
-                        if sign["name"] == name:
-                            msgs = sign.get("messages", [])
-                            if msgs:
-                                result = "\n".join(
-                                    str(m).replace("\\n", "\n") for m in msgs if m)
-                            else:
-                                result = "NO MESSAGE"
-                            break
-                except Exception as e:
-                    result = "Error: " + str(e)
-            return Response(request, content_type="text/plain",
-                          headers={"Connection": "close"}, body=result)
-
-        # ── POST /signs-search — Set filter state and redirect to /signs ──
+        # ── POST /signs-search — Set filter and redirect to /signs ────────
         @server.route("/signs-search", "POST")
         def route_signs_search(request):
             p = parse_post_body(request)
-            q = p.get("q", "").strip().lower()
-            _signs_filter[0] = q
-            _signs_page[0]   = 0  # Reset to first page on new search
+            _signs_filter[0] = p.get("q", "").strip().lower()
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
 
-        # ── POST /signs-page — Set page number and redirect to /signs ─────
-        @server.route("/signs-page", "POST")
-        def route_signs_page(request):
-            p = parse_post_body(request)
-            try:
-                _signs_page[0]   = int(p.get("p", 0))
-                _signs_filter[0] = p.get("q", "").strip().lower()
-            except Exception:
-                pass
-            return Response(request, status=(303, "See Other"),
-                          headers={"Location": "/signs", "Connection": "close"},
-                          body="")
-
-        # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
+                # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
         # Returns immediately to the browser to avoid watchdog timeout.
         # The actual fetch is done by the main loop on the next cycle.
         @server.route("/refresh-signs-cache", "POST")
@@ -1916,14 +1829,13 @@ while True:
     w.feed()
     gc.collect()
 
-    # Recreate the requests session every 5 cycles to flush SSL/socket buffers.
-    # adafruit_requests holds SSL state that doesn't fully release between calls,
-    # causing ~500KB RAM leak per cycle. Periodic recreation recovers this memory.
-    if cycles > 1 and cycles % 5 == 0 and pool is not None:
+    # Recreate the requests session every cycle to flush SSL/socket buffers.
+    # The first HTTPS request accumulates ~800KB of SSL state that doesn't
+    # fully release. Recreating each cycle keeps memory stable.
+    if cycles > 1 and pool is not None:
         try:
             requests = adafruit_requests.Session(pool, ssl_context)
             gc.collect()
-            print(f"Requests session refreshed. RAM: {gc.mem_free()} bytes")
         except Exception as _sess_err:
             print(f"Session refresh failed: {_sess_err}")
 
