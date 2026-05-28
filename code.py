@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.22"
+LOCAL_VERSION = "2.2.23"
 
 # --- Imports ---
 import ssl
@@ -1368,20 +1368,24 @@ if HAS_HTTPSERVER and pool is not None:
                 "</div>"
                 + pagination +
                 "<div style=\"display:flex;gap:12px;align-items:flex-start\">"
-                "<div style=\"flex:1;min-width:0\">"
+                "<div style=\"flex:1;min-width:0;max-width:calc(100% - 224px)\">"
                 "<form method=\"POST\" action=\"/save-signs\">"
                 "<div class=\"sign-list\" id=\"signlist\">" + items_html + "</div><br>"
                 "<button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Favorites</button>"
                 "</form></div>"
                 "<div id=\"pvpanel\" style=\"width:200px;flex-shrink:0;background:#0a0a0a;"
-                "border:1px solid #333;border-radius:6px;padding:10px;display:none;"
+                "border:1px solid #333;border-radius:6px;padding:10px;"
                 "position:sticky;top:10px;\">"
                 "<div style=\"color:#ffaa00;font-weight:bold;margin-bottom:6px;font-size:0.85em\">Preview</div>"
-                "<div id=\"pvname\" style=\"color:#00ccff;font-size:0.78em;margin-bottom:6px;word-break:break-word\"></div>"
-                "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;word-break:break-word\"></div>"
+                "<div id=\"pvname\" style=\"color:#00ccff;font-size:0.78em;margin-bottom:6px;"
+                "word-break:break-word\"></div>"
+                "<div id=\"pvmsg\" style=\"color:#00ff00;font-size:0.82em;white-space:pre-wrap;"
+                "word-break:break-word;min-height:40px\">"
+                "<span style=\"color:#444;font-size:0.85em\">Hover a sign to preview</span>"
+                "</div>"
                 "</div></div>"
                 + pagination +
-                "<script>""var CUR_Q=document.body.getAttribute('data-q')||'';""function goPage(p){""var b='p='+p+'&q='+encodeURIComponent(CUR_Q);""fetch('/signs-page',{method:'POST',""headers:{'Content-Type':'application/x-www-form-urlencoded'},""body:b}).then(function(){window.location='/signs';});}""function selectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=true;});}""function deselectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=false;});}""function showPreview(n){""fetch('/sign-preview?n='+encodeURIComponent(n))"".then(function(r){return r.text();})"".then(function(t){""document.getElementById('pvname').textContent=n;""document.getElementById('pvmsg').textContent=t;""document.getElementById('pvpanel').style.display='block';});}""function hidePreview(){""document.getElementById('pvpanel').style.display='none';}""</script>"
+                "<script>""var CUR_Q=document.body.getAttribute('data-q')||'';""function goPage(p){""var b='p='+p+'&q='+encodeURIComponent(CUR_Q);""fetch('/signs-page',{method:'POST',""headers:{'Content-Type':'application/x-www-form-urlencoded'},""body:b}).then(function(){window.location='/signs';});}""function selectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=true;});}""function deselectAll(){""document.querySelectorAll('#signlist input[type=checkbox]')"".forEach(function(b){b.checked=false;});}""function showPreview(n){""fetch('/sign-preview?n='+encodeURIComponent(n))"".then(function(r){return r.text();})"".then(function(t){""document.getElementById('pvname').textContent=n;""document.getElementById('pvmsg').textContent=t;""document.getElementById('pvmsg').textContent=t;});}""function hidePreview(){""document.getElementById('pvname').textContent='';document.getElementById('pvmsg').textContent='Hover a sign to preview';}""</script>"
                 "</div></body></html>"
             )
             w.feed()
