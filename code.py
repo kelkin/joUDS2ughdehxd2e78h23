@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.19"
+LOCAL_VERSION = "2.2.20"
 
 # --- Imports ---
 import ssl
@@ -671,6 +671,8 @@ def poll_server():
 _calib_state          = {"active": False}
 _refresh_cache_pending = [False]  # Set by web UI, consumed by main loop
 _reboot_pending        = [False]  # Set by web routes, handled by main loop after response flushes
+_signs_filter          = [""]    # Current search filter for signs page
+_signs_page            = [0]     # Current page number for signs page
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
@@ -1265,20 +1267,10 @@ if HAS_HTTPSERVER and pool is not None:
         # ── GET /signs — Traffic Signs page (paginated, 50 per page) ───────
         @server.route("/signs", GET)
         def route_signs(request):
-            # Parse page number and filter from query string
-            query = ""
-            page  = 0
-            try:
-                qs = request.query_string if hasattr(request, "query_string") else ""
-                if isinstance(qs, bytes):
-                    qs = qs.decode("utf-8")
-                for part in qs.split("&"):
-                    if part.startswith("p="):
-                        page = int(part[2:])
-                    elif part.startswith("q="):
-                        query = part[2:].replace("+", " ").replace("%20", " ").lower()
-            except Exception:
-                pass
+            # Read search filter and page from module-level state
+            # (avoids query string parsing which is unreliable in this library version)
+            query = _signs_filter[0]
+            page  = _signs_page[0]
 
             cached = load_signs_cache()
             favs   = set(load_favorite_signs())
@@ -1336,17 +1328,19 @@ if HAS_HTTPSERVER and pool is not None:
             gc.collect()
 
             # Build pagination controls
-            q_param = "&q=" + query if query else ""
             def page_btn(p, label, disabled=False):
                 if disabled:
                     return ("<button class=\"btn-gray\" disabled style=\"opacity:0.4\">"
                             + label + "</button> ")
-                return ("<a href=\"/signs?p=" + str(p) + q_param + "\">"
-                        "<button class=\"btn-gray\">" + label + "</button></a> ")
+                return ("<form method=\"POST\" action=\"/signs-page\" style=\"display:inline\">"
+                        "<input type=\"hidden\" name=\"p\" value=\"" + str(p) + "\">"
+                        "<input type=\"hidden\" name=\"q\" value=\"" + query + "\">"
+                        "<button class=\"btn-gray\" type=\"submit\">" + label + "</button>"
+                        "</form> ")
 
             pagination = (
                 "<div style=\"margin:8px 0;color:#aaa;font-size:0.85em\">"
-                "Showing " + str(page * PAGE_SIZE + 1) + "–" +
+                "Showing " + str(page * PAGE_SIZE + 1) + "&ndash;" +
                 str(min((page + 1) * PAGE_SIZE, total)) + " of " + str(total) +
                 " signs &nbsp;"
                 + page_btn(0, "&#x23EE;", page == 0)
@@ -1415,14 +1409,28 @@ if HAS_HTTPSERVER and pool is not None:
             w.feed()
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── POST /signs-search — Redirect to filtered signs page ─────────
+        # ── POST /signs-search — Set filter state and redirect to /signs ──
         @server.route("/signs-search", "POST")
         def route_signs_search(request):
             p = parse_post_body(request)
-            q = p.get("q", "").strip()
-            location = "/signs?q=" + q.replace(" ", "+") if q else "/signs"
+            q = p.get("q", "").strip().lower()
+            _signs_filter[0] = q
+            _signs_page[0]   = 0  # Reset to first page on new search
             return Response(request, status=(303, "See Other"),
-                          headers={"Location": location, "Connection": "close"},
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── POST /signs-page — Set page number and redirect to /signs ─────
+        @server.route("/signs-page", "POST")
+        def route_signs_page(request):
+            p = parse_post_body(request)
+            try:
+                _signs_page[0]   = int(p.get("p", 0))
+                _signs_filter[0] = p.get("q", "").strip().lower()
+            except Exception:
+                pass
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
                           body="")
 
                 # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
