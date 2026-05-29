@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.28"
+LOCAL_VERSION = "2.2.29"
 
 # --- Imports ---
 import ssl
@@ -192,6 +192,8 @@ _default_settings = {
     "depth":                6,       # Bit depth (color quality)
     "matrix_debug":         False,   # Enable MatrixPortal debug output
     "characters_per_line":  30,      # Text wrapping width
+    "brightness":           0.8,     # Display brightness 0.0-1.0
+    "log_refresh_seconds":  5,       # Log page auto-refresh interval (0=disabled)
 }
 
 def load_settings():
@@ -268,6 +270,7 @@ msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
 page_disp_secs      = int(settings.get("page_display_seconds", 5))
 characters_per_line = int(settings.get("characters_per_line", 30))
+brightness          = float(settings.get("brightness", 0.8))
 width               = int(settings.get("width", 192))
 height              = int(settings.get("height", 32))
 bit_depth           = int(settings.get("depth", 6))
@@ -315,7 +318,8 @@ def refresh_signs_cache_from_api():
                     msgs = [msgs]
                 elif not isinstance(msgs, list):
                     msgs = []
-                sign_data.append({"name": sign["Name"], "messages": msgs})
+                roadway = sign.get("Roadway", "")
+                sign_data.append({"name": sign["Name"], "messages": msgs, "roadway": roadway})
 
         sign_data.sort(key=lambda s: s["name"])
         api_data = None
@@ -381,7 +385,7 @@ def load_signs_cache():
         signs = data.get("signs", [])
         # Handle old format: list of plain strings
         if signs and isinstance(signs[0], str):
-            return [{"name": s, "messages": []} for s in signs]
+            return [{"name": s, "messages": [], "roadway": ""} for s in signs]
         return signs
     except Exception:
         return []
@@ -424,6 +428,7 @@ matrixportal.add_text(
     line_spacing=0.8,
     text_color=sign_text_color[0]  # remapped for hardware color order
 )
+matrixportal.display.brightness = brightness
 w.feed()
 
 # --- Helper Functions ---
@@ -1052,15 +1057,38 @@ if HAS_HTTPSERVER and pool is not None:
         def route_index(request):
             logs_html = (web_logger.get_logs()
                          .replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
+            # Auto-refresh interval from settings (default 5s), 0 = disabled
+            log_refresh = int(settings.get("log_refresh_seconds", 5))
+            refresh_meta = ('<meta http-equiv="refresh" content="' + str(log_refresh) + '">'
+                           if log_refresh > 0 else "")
             body = (
                 html_head("Matrix Portal S3 - Log") +
+                refresh_meta +
                 "<body>" + html_nav("log") +
                 "<h1>&#x1F6A8; Matrix Portal S3</h1>" + html_meta() +
+                "<div style=\"margin-bottom:8px;color:#888;font-size:0.85em\">"
+                + ("Auto-refreshing every " + str(log_refresh) + "s &nbsp;"
+                   "<a href=\"/log-refresh/0\" style=\"color:#555\">Pause</a>"
+                   if log_refresh > 0 else
+                   "Auto-refresh paused &nbsp;"
+                   "<a href=\"/log-refresh/5\" style=\"color:#00ccff\">Resume (5s)</a>")
+                + "</div>"
                 "<div class=\"card\"><h2>Log Output:</h2>"
                 "<pre>" + logs_html + "</pre></div>"
                 "</body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /log-refresh/<n> — Set log auto-refresh interval ────────
+        @server.route("/log-refresh/<n>", GET)
+        def route_log_refresh(request, n):
+            try:
+                settings["log_refresh_seconds"] = max(0, int(n))
+                save_settings(settings)
+            except Exception:
+                pass
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/", "Connection": "close"}, body="")
 
         # ── GET /rebooting — Safe landing page after reboot redirect ────
         # This is a GET route so browser refresh won't re-trigger the reboot.
@@ -1118,6 +1146,7 @@ if HAS_HTTPSERVER and pool is not None:
             m_h, m_m, m_s = secs_to_hms(int(settings.get("msg_display_seconds", 10)))
             p_h, p_m, p_s = secs_to_hms(int(settings.get("page_display_seconds", 5)))
             c_h, c_m, c_s = secs_to_hms(int(settings.get("cycle_sleep_seconds", 30)))
+            cur_m_h, cur_m_m, cur_m_s = m_h, m_m, m_s  # Ensure always defined
 
             order_opts = ""
             for o in VALID_COLOR_ORDERS:
@@ -1149,6 +1178,20 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"card\"><h2>Display Settings</h2>"
                 "<form method=\"POST\" action=\"/save-settings\">"
 
+                "<div class=\"row\"><label>Brightness:</label>"
+                "<input type=\"range\" name=\"brightness\" min=\"0\" max=\"100\" "
+                "value=\"" + str(int(float(settings.get("brightness", 0.8)) * 100)) + "\" "
+                "style=\"width:180px;vertical-align:middle\">"
+                "<span id=\"bval\" style=\"margin-left:8px;color:#eee\">"
+                + str(int(float(settings.get("brightness", 0.8)) * 100)) + "%</span>"
+                "<script>document.querySelector('[name=brightness]').oninput=function(){"
+                "document.getElementById('bval').textContent=this.value+'%';"
+                "document.getElementById('bprev').style.opacity=this.value/100;};"
+                "</script>"
+                "<span id=\"bprev\" style=\"margin-left:8px;display:inline-block;"
+                "width:20px;height:20px;background:#fff;border-radius:3px;vertical-align:middle;"
+                "opacity:" + str(float(settings.get("brightness", 0.8))) + "\"></span>"
+                "</div>"
                 "<div class=\"row\"><label>Color Order:</label>"
                 "<select name=\"color_order\">" + order_opts + "</select></div>"
 
@@ -1203,6 +1246,10 @@ if HAS_HTTPSERVER and pool is not None:
                 new_order = p.get("color_order", settings.get("color_order", "RGB")).upper()
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
+                try:
+                    new_brightness = max(0.0, min(1.0, int(p.get("brightness", 80)) / 100.0))
+                except Exception:
+                    new_brightness = float(settings.get("brightness", 0.8))
 
                 new_color      = _parse_color_field(p, "sign_text_color", "#F7B500")
                 new_name_color = _parse_color_field(p, "sign_name_color",  "#0000FF")
@@ -1222,6 +1269,7 @@ if HAS_HTTPSERVER and pool is not None:
                 new_cycle_secs = hms_to_secs(
                     p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
+                settings["brightness"]           = new_brightness
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
                 settings["sign_name_color"]        = new_name_color
@@ -1240,6 +1288,7 @@ if HAS_HTTPSERVER and pool is not None:
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
+                matrixportal.display.brightness = new_brightness
 
                 status = ("Saved! Reboot required to apply color order change." if new_order != color_order else "Saved!") if ok else "Save failed."
                 cls = "status-ok" if ok else "status-err"
@@ -1273,7 +1322,9 @@ if HAS_HTTPSERVER and pool is not None:
             w.feed()
 
             if query:
-                all_items = [s for s in cached if query in s["name"].lower()]
+                all_items = [s for s in cached if
+                             query in s["name"].lower() or
+                             query in s.get("roadway", "").lower()]
             else:
                 fav_items   = sorted([s for s in cached if s["name"] in favs],
                                      key=lambda s: s["name"])
@@ -1296,10 +1347,14 @@ if HAS_HTTPSERVER and pool is not None:
                     tip = " | ".join(str(m).replace('"',"'") for m in msgs if m)[:200]
                 else:
                     tip = "No message"
+                roadway = sign.get("roadway", "")
+                roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
+                                'margin-top:-2px">' + roadway + '</div>' if roadway else "")
                 items_parts.append(
                     '<div class="sign-item' + fav_cls + '" title="' + tip + '">'
                     '<label><input type="checkbox" name="fav" value="' +
-                    safe_name + '"' + checked + '> ' + safe_name + '</label></div>'
+                    safe_name + '"' + checked + '> ' + safe_name + '</label>'
+                    + roadway_html + '</div>'
                 )
             items_html = "".join(items_parts)
             items_parts = None
@@ -1851,6 +1906,18 @@ while True:
         _refresh_cache_pending[0] = False
         if wifi.radio.connected and requests is not None:
             refresh_signs_cache_from_api()
+            # Recreate session after cache refresh to flush SSL state before
+            # the regular fetch. Also skip the regular fetch this cycle since
+            # we just pulled all sign data from the API anyway.
+            try:
+                requests = adafruit_requests.Session(pool, ssl_context)
+                gc.collect()
+                gc.collect()
+            except Exception:
+                pass
+            print("Cache refresh complete — skipping regular fetch this cycle.")
+            safe_delay(cycle_sleep_secs)
+            continue
         else:
             print("Cache refresh skipped — no network.")
 
