@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.43"
+LOCAL_VERSION = "2.2.44"
 
 # --- Imports ---
 import ssl
@@ -263,12 +263,8 @@ def color_for_display(hex_str):
 settings = load_settings()
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
-sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]  # Remapped for hardware color order
-sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000FF"))]  # Remapped for hardware color order
-print(f"Color remap test: yellow #FFFF00 with {color_order} -> #{remap_color(0xFFFF00, color_order):06X}")
-print(f"Color remap test: blue #0000FF with {color_order} -> #{remap_color(0x0000FF, color_order):06X}")
-print(f"sign_text_color raw={settings.get('sign_text_color')} remapped=#{sign_text_color[0]:06X}")
-print(f"sign_name_color raw={settings.get('sign_name_color')} remapped=#{sign_name_color[0]:06X}")
+sign_text_color     = [hex_to_int(settings.get("sign_text_color", "#F7B500"))]  # Raw color — set_text_color() ignores color_order
+sign_name_color     = [hex_to_int(settings.get("sign_name_color",  "#0000FF"))]  # Raw color — set_text_color() ignores color_order
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
@@ -1327,8 +1323,8 @@ if HAS_HTTPSERVER and pool is not None:
                 msg_disp_secs    = new_msg_secs
                 page_disp_secs   = new_page_secs
                 cycle_sleep_secs = new_cycle_secs
-                sign_text_color[0] = color_for_display(new_color)
-                sign_name_color[0] = color_for_display(new_name_color)
+                sign_text_color[0] = hex_to_int(new_color)
+                sign_name_color[0] = hex_to_int(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
                 # brightness requires reboot to apply (bit_depth change)
 
@@ -1885,8 +1881,8 @@ if HAS_HTTPSERVER and pool is not None:
                         # Reload settings into memory
                         loaded = load_settings()
                         settings.update(loaded)
-                        sign_text_color[0] = color_for_display(settings.get("sign_text_color","#F7B500"))
-                        sign_name_color[0] = color_for_display(settings.get("sign_name_color","#0000FF"))
+                        sign_text_color[0] = hex_to_int(settings.get("sign_text_color","#F7B500"))
+                        sign_name_color[0] = hex_to_int(settings.get("sign_name_color","#0000FF"))
                         matrixportal.set_text_color(sign_text_color[0], 0)
                         status_lines.append("&#x2713; settings.json synced")
                     else:
