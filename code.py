@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.29"
+LOCAL_VERSION = "2.2.33"
 
 # --- Imports ---
 import ssl
@@ -1057,13 +1057,15 @@ if HAS_HTTPSERVER and pool is not None:
         def route_index(request):
             logs_html = (web_logger.get_logs()
                          .replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
-            # Auto-refresh interval from settings (default 5s), 0 = disabled
             log_refresh = int(settings.get("log_refresh_seconds", 5))
+            # Meta refresh must go inside <head> — inject it before </head>
             refresh_meta = ('<meta http-equiv="refresh" content="' + str(log_refresh) + '">'
                            if log_refresh > 0 else "")
+            head = html_head("Matrix Portal S3 - Log")
+            if refresh_meta:
+                head = head.replace("</head>", refresh_meta + "</head>")
             body = (
-                html_head("Matrix Portal S3 - Log") +
-                refresh_meta +
+                head +
                 "<body>" + html_nav("log") +
                 "<h1>&#x1F6A8; Matrix Portal S3</h1>" + html_meta() +
                 "<div style=\"margin-bottom:8px;color:#888;font-size:0.85em\">"
@@ -1238,7 +1240,7 @@ if HAS_HTTPSERVER and pool is not None:
         # ── POST /save-settings ───────────────────────────────────────────
         @server.route("/save-settings", "POST")
         def route_save_settings(request):
-            global name_disp_secs, msg_disp_secs, cycle_sleep_secs
+            global name_disp_secs, msg_disp_secs, page_disp_secs, cycle_sleep_secs
             try:
                 p = parse_post_body(request)
                 print("POST params: " + str(p))  # Debug — remove after confirming
@@ -1380,7 +1382,7 @@ if HAS_HTTPSERVER and pool is not None:
                  '<p style="color:#aaa">No sign cache. Click Refresh to load from NY511.</p>') +
                 '<form method="POST" action="/signs-search">'
                 '<input type="text" name="q" value="' + query + '" '
-                'placeholder="Filter signs..." '
+                'placeholder="Filter signs..." autocomplete="off" '
                 'style="width:100%;margin-bottom:8px;padding:8px;background:#222;'
                 'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
                 '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
@@ -2010,4 +2012,3 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
-
