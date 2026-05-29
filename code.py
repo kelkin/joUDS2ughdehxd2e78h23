@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.40"
+LOCAL_VERSION = "2.2.41"
 
 # --- Imports ---
 import ssl
@@ -265,6 +265,10 @@ settings = load_settings()
 color_order         = settings.get("color_order", "RGB")
 sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]  # Remapped for hardware color order
 sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000FF"))]  # Remapped for hardware color order
+print(f"Color remap test: yellow #FFFF00 with {color_order} -> #{remap_color(0xFFFF00, color_order):06X}")
+print(f"Color remap test: blue #0000FF with {color_order} -> #{remap_color(0x0000FF, color_order):06X}")
+print(f"sign_text_color raw={settings.get('sign_text_color')} remapped=#{sign_text_color[0]:06X}")
+print(f"sign_name_color raw={settings.get('sign_name_color')} remapped=#{sign_name_color[0]:06X}")
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
