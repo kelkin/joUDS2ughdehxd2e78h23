@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.35"
+LOCAL_VERSION = "2.2.36"
 
 # --- Imports ---
 import ssl
@@ -429,6 +429,7 @@ matrixportal.add_text(
     text_color=sign_text_color[0]  # remapped for hardware color order
 )
 matrixportal.display.brightness = brightness
+print(f"Display type: {type(matrixportal.display)}, brightness set to {brightness}, reads back: {matrixportal.display.brightness}")
 w.feed()
 
 # --- Helper Functions ---
@@ -1090,9 +1091,13 @@ if HAS_HTTPSERVER and pool is not None:
         def route_set_brightness(request, v):
             try:
                 b = max(0.0, min(1.0, int(v) / 100.0))
+                print(f"Setting brightness to {b} (type: {type(matrixportal.display)})")
+                before = matrixportal.display.brightness
                 matrixportal.display.brightness = b
-            except Exception:
-                pass
+                after = matrixportal.display.brightness
+                print(f"Brightness before={before} after={after}")
+            except Exception as e:
+                print(f"Brightness error: {e}")
             return Response(request, content_type="text/plain",
                           headers={"Connection": "close"}, body="ok")
 
