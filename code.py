@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.41"
+LOCAL_VERSION = "2.2.42"
 
 # --- Imports ---
 import ssl
@@ -1088,6 +1088,41 @@ if HAS_HTTPSERVER and pool is not None:
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
 
+
+        # ── GET /color-test/<order> — Test a color order directly ───────
+        # Bypasses remap_color and sends raw yellow/blue directly to the
+        # display with the given color_order — helps find correct order empirically.
+        # Usage: navigate to /color-test/RGB, /color-test/GBR etc.
+        @server.route("/color-test/<order>", GET)
+        def route_color_test(request, order):
+            order = order.upper()
+            if order not in VALID_COLOR_ORDERS:
+                order = "RGB"
+            try:
+                # Show raw yellow (#FFFF00) without any remapping
+                matrixportal.set_text_color(0xFFFF00, 0)
+                matrixportal.set_text(center_multiline_string(
+                    "ORDER\n" + order + "\nYELLOW?", characters_per_line), 0)
+                print(f"Color test: showing raw #FFFF00 with order={order}")
+            except Exception as e:
+                print(f"Color test error: {e}")
+            body = (
+                html_head("Color Test") +
+                "<body>" + html_nav("settings") +
+                "<h1>Color Order Test: " + order + "</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Displaying raw yellow (#FFFF00) on the sign. "
+                "If it looks yellow, <strong>" + order + "</strong> is correct.</p>"
+                "<p>Try each order:</p>"
+                + "".join('<a href="/color-test/' + o + '"><button class="btn-gray" '
+                          + ('style="outline:2px solid #fff"' if o == order else '') + '>'
+                          + o + '</button></a> ' for o in VALID_COLOR_ORDERS) +
+                "<br><br><p style=\"color:#888\">When you find the correct order, "
+                "update it in Settings and save.</p>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
 
         # ── GET /log-refresh/<n> — Set log auto-refresh interval ────────
         @server.route("/log-refresh/<n>", GET)
