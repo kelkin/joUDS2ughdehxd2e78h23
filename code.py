@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.33"
+LOCAL_VERSION = "2.2.35"
 
 # --- Imports ---
 import ssl
@@ -678,6 +678,7 @@ _refresh_cache_pending = [False]  # Set by web UI, consumed by main loop
 _reboot_pending        = [False]  # Set by web routes, handled by main loop after response flushes
 _signs_filter          = [""]    # Current search filter for signs page
 _signs_page            = [0]     # Current page number for signs page
+_signs_show_all        = [False] # Whether to show full unfiltered list
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
@@ -1081,6 +1082,20 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
+        # ── GET /set-brightness/<v> — Live brightness preview ────────────
+        # Called by the slider's oninput JS handler (debounced 150ms).
+        # Updates display brightness immediately without saving to settings.json.
+        # The value is saved permanently when the user clicks Save Settings.
+        @server.route("/set-brightness/<v>", GET)
+        def route_set_brightness(request, v):
+            try:
+                b = max(0.0, min(1.0, int(v) / 100.0))
+                matrixportal.display.brightness = b
+            except Exception:
+                pass
+            return Response(request, content_type="text/plain",
+                          headers={"Connection": "close"}, body="ok")
+
         # ── GET /log-refresh/<n> — Set log auto-refresh interval ────────
         @server.route("/log-refresh/<n>", GET)
         def route_log_refresh(request, n):
@@ -1181,18 +1196,26 @@ if HAS_HTTPSERVER and pool is not None:
                 "<form method=\"POST\" action=\"/save-settings\">"
 
                 "<div class=\"row\"><label>Brightness:</label>"
-                "<input type=\"range\" name=\"brightness\" min=\"0\" max=\"100\" "
+                "<input type=\"range\" name=\"brightness\" id=\"bslider\" min=\"0\" max=\"100\" "
                 "value=\"" + str(int(float(settings.get("brightness", 0.8)) * 100)) + "\" "
                 "style=\"width:180px;vertical-align:middle\">"
                 "<span id=\"bval\" style=\"margin-left:8px;color:#eee\">"
                 + str(int(float(settings.get("brightness", 0.8)) * 100)) + "%</span>"
-                "<script>document.querySelector('[name=brightness]').oninput=function(){"
-                "document.getElementById('bval').textContent=this.value+'%';"
-                "document.getElementById('bprev').style.opacity=this.value/100;};"
-                "</script>"
                 "<span id=\"bprev\" style=\"margin-left:8px;display:inline-block;"
                 "width:20px;height:20px;background:#fff;border-radius:3px;vertical-align:middle;"
                 "opacity:" + str(float(settings.get("brightness", 0.8))) + "\"></span>"
+                "<script>"
+                "var bslider=document.getElementById('bslider');"
+                "var btimer=null;"
+                "bslider.oninput=function(){"
+                "document.getElementById('bval').textContent=this.value+'%';"
+                "document.getElementById('bprev').style.opacity=this.value/100;"
+                "var v=this.value;"
+                "if(btimer)clearTimeout(btimer);"
+                "btimer=setTimeout(function(){"
+                "fetch('/set-brightness/'+v);"
+                "},150);};"
+                "</script>"
                 "</div>"
                 "<div class=\"row\"><label>Color Order:</label>"
                 "<select name=\"color_order\">" + order_opts + "</select></div>"
@@ -1323,45 +1346,66 @@ if HAS_HTTPSERVER and pool is not None:
             favs   = set(load_favorite_signs())
             w.feed()
 
+            # Only build the full list when there's a search filter or show_all is set.
+            # Loading all 937 signs takes 30-60 seconds — require a search first.
             if query:
                 all_items = [s for s in cached if
                              query in s["name"].lower() or
                              query in s.get("roadway", "").lower()]
-            else:
+            elif _signs_show_all[0]:
                 fav_items   = sorted([s for s in cached if s["name"] in favs],
                                      key=lambda s: s["name"])
                 other_items = sorted([s for s in cached if s["name"] not in favs],
                                      key=lambda s: s["name"])
                 all_items   = fav_items + other_items
+            else:
+                all_items = None  # Show prompt instead
             w.feed()
 
-            items_parts = []
-            for i, sign in enumerate(all_items):
-                if i % 50 == 0:
-                    w.feed()
-                name     = sign["name"]
-                checked  = " checked" if name in favs else ""
-                fav_cls  = " fav" if name in favs else ""
-                safe_name = (name.replace("&","&amp;").replace("<","&lt;")
-                                 .replace(">","&gt;").replace('"',"&quot;"))
-                msgs = sign.get("messages", [])
-                if msgs:
-                    tip = " | ".join(str(m).replace('"',"'") for m in msgs if m)[:200]
-                else:
-                    tip = "No message"
-                roadway = sign.get("roadway", "")
-                roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
-                                'margin-top:-2px">' + roadway + '</div>' if roadway else "")
-                items_parts.append(
-                    '<div class="sign-item' + fav_cls + '" title="' + tip + '">'
-                    '<label><input type="checkbox" name="fav" value="' +
-                    safe_name + '"' + checked + '> ' + safe_name + '</label>'
-                    + roadway_html + '</div>'
+            if all_items is None:
+                items_html = ""
+                sign_count_text = str(len(cached)) + " signs cached."
+                list_section = (
+                    '<p style="color:#aaa">Search for signs by name or roadway, or click '
+                    'Show All to browse all ' + str(len(cached)) + ' signs '
+                    '(takes 30-60 seconds to load).</p>'
+                    '<a href="/signs-all"><button class="btn-gray">&#x1F4CB; Show All Signs</button></a>'
                 )
-            items_html = "".join(items_parts)
-            items_parts = None
-            w.feed()
-            gc.collect()
+            else:
+                items_parts = []
+                for i, sign in enumerate(all_items):
+                    if i % 50 == 0:
+                        w.feed()
+                    name     = sign["name"]
+                    checked  = " checked" if name in favs else ""
+                    fav_cls  = " fav" if name in favs else ""
+                    safe_name = (name.replace("&","&amp;").replace("<","&lt;")
+                                     .replace(">","&gt;").replace('"',"&quot;"))
+                    msgs = sign.get("messages", [])
+                    if msgs:
+                        tip = str(msgs[0]).replace('"',"'")[:150]
+                    else:
+                        tip = "No message"
+                    roadway = sign.get("roadway", "")
+                    roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
+                                    'margin-top:-2px">' + roadway + '</div>' if roadway else "")
+                    items_parts.append(
+                        '<div class="sign-item' + fav_cls + '" title="' + tip + '">'
+                        '<label><input type="checkbox" name="fav" value="' +
+                        safe_name + '"' + checked + '> ' + safe_name + '</label>'
+                        + roadway_html + '</div>'
+                    )
+                items_html = "".join(items_parts)
+                items_parts = None
+                w.feed()
+                gc.collect()
+                sign_count_text = str(len(all_items)) + " signs shown."
+                list_section = (
+                    '<form method="POST" action="/save-signs">'
+                    '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
+                    '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
+                    '</form>'
+                )
 
             body = (
                 html_head("Traffic Signs") +
@@ -1372,32 +1416,26 @@ if HAS_HTTPSERVER and pool is not None:
                 '<button class="btn-cyan" type="submit">&#x1F504; Refresh from NY511</button>'
                 '</form>'
                 '<span style="color:#888;margin-left:15px;font-size:0.9em">'
-                'Fetches ~930 signs. Takes 15-20 seconds.</span>'
+                'Fetches ~930 signs. Takes up to 90 seconds.</span>'
                 '</div>'
                 '<div class="card">' +
-                ('<p style="color:#aaa">' + str(len(cached)) +
-                 ' signs cached. Favorites in <span style="color:#F7B500">yellow</span>. '
+                ('<p style="color:#aaa">' + sign_count_text +
+                 ' Favorites in <span style="color:#F7B500">yellow</span>. '
                  'Hover a sign name to see its messages.</p>'
                  if cached else
                  '<p style="color:#aaa">No sign cache. Click Refresh to load from NY511.</p>') +
                 '<form method="POST" action="/signs-search">'
                 '<input type="text" name="q" value="' + query + '" '
-                'placeholder="Filter signs..." autocomplete="off" '
+                'placeholder="Search by sign name or roadway..." autocomplete="off" '
                 'style="width:100%;margin-bottom:8px;padding:8px;background:#222;'
                 'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
                 '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
                 ' <a href="/signs-clear"><button class="btn-gray" type="button">&#x2715; Clear</button></a>'
                 '</form><br>'
-                '<div style="margin-bottom:8px">'
+                + (('<div style="margin-bottom:8px">'
                 '<button class="btn-gray" type="button" onclick="selectAll()">&#x2611; Select All</button>'
                 ' <button class="btn-gray" type="button" onclick="deselectAll()">&#x2610; Deselect All</button>'
-                ' <span style="color:#888;margin-left:10px;font-size:0.85em">'
-                + str(len(all_items)) + ' signs shown</span>'
                 '</div>'
-                '<form method="POST" action="/save-signs">'
-                '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
-                '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
-                '</form>'
                 '<script>'
                 'function selectAll(){'
                 'document.querySelectorAll("#signlist input[type=checkbox]")'
@@ -1405,7 +1443,8 @@ if HAS_HTTPSERVER and pool is not None:
                 'function deselectAll(){'
                 'document.querySelectorAll("#signlist input[type=checkbox]")'
                 '.forEach(function(b){b.checked=false;});}'
-                '</script>'
+                '</script>') if all_items is not None else "") +
+                list_section +
                 '</div></body></html>'
             )
             w.feed()
@@ -1415,6 +1454,16 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/signs-clear", GET)
         def route_signs_clear(request):
             _signs_filter[0] = ""
+            _signs_show_all[0] = False  # Don't auto-load full list
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── GET /signs-all — Show full unfiltered sign list ──────────────
+        @server.route("/signs-all", GET)
+        def route_signs_all(request):
+            _signs_filter[0]   = ""
+            _signs_show_all[0] = True
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
@@ -1423,7 +1472,9 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/signs-search", "POST")
         def route_signs_search(request):
             p = parse_post_body(request)
-            _signs_filter[0] = p.get("q", "").strip().lower()
+            q = p.get("q", "").strip().lower()
+            _signs_filter[0]   = q
+            _signs_show_all[0] = bool(q)  # show results only if query non-empty
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
@@ -1441,9 +1492,9 @@ if HAS_HTTPSERVER and pool is not None:
                 "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
                 "<div class=\"card\">"
                 "<p style=\"color:#ffaa00\">&#x23F3; Fetching signs from NY511...</p>"
-                "<p style=\"color:#aaa\">This takes 15-20 seconds. "
+                "<p style=\"color:#aaa\">This takes up to 90 seconds. "
                 "The page will redirect automatically when done.</p>"
-                "<script>setTimeout(function(){window.location='/signs'},25000);</script>"
+                "<script>setTimeout(function(){window.location='/signs'},95000);</script>"
                 "</div></body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
@@ -2012,3 +2063,4 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
+
