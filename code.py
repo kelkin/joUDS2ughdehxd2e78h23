@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.36"
+LOCAL_VERSION = "2.2.37"
 
 # --- Imports ---
 import ssl
@@ -428,8 +428,8 @@ matrixportal.add_text(
     line_spacing=0.8,
     text_color=sign_text_color[0]  # remapped for hardware color order
 )
-matrixportal.display.brightness = brightness
-print(f"Display type: {type(matrixportal.display)}, brightness set to {brightness}, reads back: {matrixportal.display.brightness}")
+# Note: FramebufferDisplay.brightness only supports 0.0 (off) or 1.0 (full).
+# True brightness is controlled via bit_depth at initialization — see settings.
 w.feed()
 
 # --- Helper Functions ---
@@ -1083,23 +1083,7 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-        # ── GET /set-brightness/<v> — Live brightness preview ────────────
-        # Called by the slider's oninput JS handler (debounced 150ms).
-        # Updates display brightness immediately without saving to settings.json.
-        # The value is saved permanently when the user clicks Save Settings.
-        @server.route("/set-brightness/<v>", GET)
-        def route_set_brightness(request, v):
-            try:
-                b = max(0.0, min(1.0, int(v) / 100.0))
-                print(f"Setting brightness to {b} (type: {type(matrixportal.display)})")
-                before = matrixportal.display.brightness
-                matrixportal.display.brightness = b
-                after = matrixportal.display.brightness
-                print(f"Brightness before={before} after={after}")
-            except Exception as e:
-                print(f"Brightness error: {e}")
-            return Response(request, content_type="text/plain",
-                          headers={"Connection": "close"}, body="ok")
+
 
         # ── GET /log-refresh/<n> — Set log auto-refresh interval ────────
         @server.route("/log-refresh/<n>", GET)
@@ -1201,26 +1185,15 @@ if HAS_HTTPSERVER and pool is not None:
                 "<form method=\"POST\" action=\"/save-settings\">"
 
                 "<div class=\"row\"><label>Brightness:</label>"
-                "<input type=\"range\" name=\"brightness\" id=\"bslider\" min=\"0\" max=\"100\" "
-                "value=\"" + str(int(float(settings.get("brightness", 0.8)) * 100)) + "\" "
-                "style=\"width:180px;vertical-align:middle\">"
-                "<span id=\"bval\" style=\"margin-left:8px;color:#eee\">"
-                + str(int(float(settings.get("brightness", 0.8)) * 100)) + "%</span>"
-                "<span id=\"bprev\" style=\"margin-left:8px;display:inline-block;"
-                "width:20px;height:20px;background:#fff;border-radius:3px;vertical-align:middle;"
-                "opacity:" + str(float(settings.get("brightness", 0.8))) + "\"></span>"
-                "<script>"
-                "var bslider=document.getElementById('bslider');"
-                "var btimer=null;"
-                "bslider.oninput=function(){"
-                "document.getElementById('bval').textContent=this.value+'%';"
-                "document.getElementById('bprev').style.opacity=this.value/100;"
-                "var v=this.value;"
-                "if(btimer)clearTimeout(btimer);"
-                "btimer=setTimeout(function(){"
-                "fetch('/set-brightness/'+v);"
-                "},150);};"
-                "</script>"
+                "<select name=\"depth\">"
+                + "".join('<option value="' + str(d) + '"' +
+                          (' selected' if int(settings.get("depth", 6)) == d else '') +
+                          '>' + {1:"1 — Very Dim", 2:"2 — Dim", 3:"3 — Medium",
+                                 4:"4 — Bright", 5:"5 — Very Bright",
+                                 6:"6 — Maximum"}[d] + '</option>'
+                          for d in range(1, 7)) +
+                "</select>"
+                "<small style=\"color:#888;margin-left:8px\">(requires reboot)</small>"
                 "</div>"
                 "<div class=\"row\"><label>Color Order:</label>"
                 "<select name=\"color_order\">" + order_opts + "</select></div>"
@@ -1277,9 +1250,9 @@ if HAS_HTTPSERVER and pool is not None:
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
                 try:
-                    new_brightness = max(0.0, min(1.0, int(p.get("brightness", 80)) / 100.0))
+                    new_depth = max(1, min(6, int(p.get("depth", settings.get("depth", 6)))))
                 except Exception:
-                    new_brightness = float(settings.get("brightness", 0.8))
+                    new_depth = int(settings.get("depth", 6))
 
                 new_color      = _parse_color_field(p, "sign_text_color", "#F7B500")
                 new_name_color = _parse_color_field(p, "sign_name_color",  "#0000FF")
@@ -1299,7 +1272,7 @@ if HAS_HTTPSERVER and pool is not None:
                 new_cycle_secs = hms_to_secs(
                     p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
-                settings["brightness"]           = new_brightness
+                settings["depth"]                = new_depth
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
                 settings["sign_name_color"]        = new_name_color
@@ -1318,9 +1291,10 @@ if HAS_HTTPSERVER and pool is not None:
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
-                matrixportal.display.brightness = new_brightness
+                # brightness requires reboot to apply (bit_depth change)
 
-                status = ("Saved! Reboot required to apply color order change." if new_order != color_order else "Saved!") if ok else "Save failed."
+                needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
+                status = ("Saved! Reboot required to apply changes." if needs_reboot else "Saved!") if ok else "Save failed."
                 cls = "status-ok" if ok else "status-err"
                 print("Settings saved: order=" + new_order
                       + " msg_color=" + new_color + " name_color=" + new_name_color
