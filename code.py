@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.37"
+LOCAL_VERSION = "2.2.40"
 
 # --- Imports ---
 import ssl
@@ -777,7 +777,7 @@ def perform_ota_check(requests_session, force=False):
 
     # Display local version on matrix
     matrixportal.set_text_color(0x00FFFF, 0)  # Cyan
-    matrixportal.set_text(center_multiline_string(f"LOCAL VER\n{LOCAL_VERSION}", characters_per_line), 0)
+    matrixportal.set_text(center_multiline_string(f"LOCAL\nVERSION\n{LOCAL_VERSION}", characters_per_line), 0)
     safe_delay(2)
 
     # Fetch manifest with retry
@@ -827,13 +827,13 @@ def perform_ota_check(requests_session, force=False):
 
         # Display remote version on matrix
         matrixportal.set_text_color(0xFFFF00, 0)  # Yellow
-        matrixportal.set_text(center_multiline_string(f"CLOUD VER\n{remote_version}", characters_per_line), 0)
+        matrixportal.set_text(center_multiline_string(f"CLOUD\nVERSION\n{remote_version}", characters_per_line), 0)
         safe_delay(2)
 
         if remote_version == LOCAL_VERSION and not force:
             print("Firmware is up to date!")
             matrixportal.set_text_color(0x00FF00, 0)  # Green
-            matrixportal.set_text(center_multiline_string("VER VERIFIED\nUP TO DATE", characters_per_line), 0)
+            matrixportal.set_text(center_multiline_string("VERSION\nVERIFIED\nUP TO DATE", characters_per_line), 0)
             safe_delay(2)
             return
 
@@ -1188,9 +1188,9 @@ if HAS_HTTPSERVER and pool is not None:
                 "<select name=\"depth\">"
                 + "".join('<option value="' + str(d) + '"' +
                           (' selected' if int(settings.get("depth", 6)) == d else '') +
-                          '>' + {1:"1 — Very Dim", 2:"2 — Dim", 3:"3 — Medium",
-                                 4:"4 — Bright", 5:"5 — Very Bright",
-                                 6:"6 — Maximum"}[d] + '</option>'
+                          '>' + {1:"1 - Very Dim", 2:"2 - Dim", 3:"3 - Medium",
+                                 4:"4 - Bright", 5:"5 - Very Bright",
+                                 6:"6 - Maximum"}[d] + '</option>'
                           for d in range(1, 7)) +
                 "</select>"
                 "<small style=\"color:#888;margin-left:8px\">(requires reboot)</small>"
@@ -1529,25 +1529,34 @@ if HAS_HTTPSERVER and pool is not None:
             _calib_state["active"] = True
 
             # Calibration ONLY works correctly when color_order is RGB.
-            # If it's currently something else, save RGB temporarily so the
-            # hardware shows raw uncorrected colors during the test.
-            # The user's selection will then produce the correct order to save.
-            calib_needs_reset = (color_order != "RGB")
+            # Read from settings dict (always current) not the module-level
+            # color_order variable which may be stale after a settings save.
+            current_order = settings.get("color_order", "RGB")
+            calib_needs_reset = (current_order != "RGB")
+            print(f"Calibration: current color_order={current_order} needs_reset={calib_needs_reset}")
             if calib_needs_reset:
                 settings["color_order"] = "RGB"
                 save_settings(settings)
                 print("Calibration: temporarily set color_order=RGB for accurate test.")
-                print("Board must reboot to apply — redirecting to reboot first.")
+                print("Board must reboot to apply — rebooting now.")
                 body = (
-                    html_head("Calibration — Reboot Required") +
+                    html_head("Calibration — Rebooting...") +
                     "<body>" + html_nav("settings") +
                     "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
                     "<div class=\"card\">"
-                    "<p style=\"color:#ffaa00\"><strong>One moment — the board needs to reboot "
-                    "with a neutral color order before calibration can show accurate colors.</strong></p>"
-                    "<p style=\"color:#aaa\">The board will reboot automatically, then navigate "
-                    "back to Settings and click Start Calibration again.</p>"
-                    "<script>setTimeout(function(){window.location='/rebooting'},1500);</script>"
+                    "<p style=\"color:#ffaa00\"><strong>Rebooting with neutral color order...</strong></p>"
+                    "<p style=\"color:#aaa\">The board is restarting. This page will automatically "
+                    "redirect to calibration when the board is back online.</p>"
+                    "<p id=\"status\" style=\"color:#888\">&#x23F3; Waiting for board...</p>"
+                    "<script>"
+                    "function tryReconnect(){"
+                    "  fetch('/').then(function(r){"
+                    "    if(r.ok){window.location='/settings';}"
+                    "    else{setTimeout(tryReconnect,2000);}"
+                    "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                    "}"
+                    "setTimeout(tryReconnect,6000);"
+                    "</script>"
                     "</div></body></html>"
                 )
                 # Set flag — main loop handles the actual reboot after response flushes
