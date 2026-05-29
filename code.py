@@ -35,7 +35,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.27"
+LOCAL_VERSION = "2.2.28"
 
 # --- Imports ---
 import ssl
